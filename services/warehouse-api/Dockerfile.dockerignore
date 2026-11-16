@@ -1,0 +1,11 @@
+**/.git
+**/.venv
+**/venv*
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/*.egg-info
+libs/wcommon/build
+infrastructure
+docs
+tests
