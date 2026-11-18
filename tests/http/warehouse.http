@@ -1,0 +1,100 @@
+@host = http://localhost:8001
+@cid = COR-demo-0001
+
+###
+GET {{host}}/health
+
+###
+GET {{host}}/metrics
+
+###
+POST {{host}}/products
+Content-Type: application/json
+X-Correlation-ID: {{cid}}
+
+{"sku": "P-100", "name": "Caja grande", "description": "Caja 60x40", "category": "Empaque", "unit": "unidad"}
+
+###
+GET {{host}}/products?skip=0&limit=50
+
+###
+GET {{host}}/products/1
+
+###
+GET {{host}}/products/by-sku/P-100
+
+###
+PUT {{host}}/products/1
+Content-Type: application/json
+
+{"name": "Caja grande reforzada", "category": "Empaque"}
+
+###
+DELETE {{host}}/products/1
+
+###
+POST {{host}}/inventory/movements
+Content-Type: application/json
+X-Correlation-ID: {{cid}}
+
+{"sku": "P-100", "type": "RECEIPT", "quantity": 50, "reference": "OC-1001"}
+
+###
+POST {{host}}/inventory/movements
+Content-Type: application/json
+
+{"product_id": 1, "type": "SHIPMENT", "quantity": 5, "reference": "PED-77"}
+
+###
+POST {{host}}/inventory/movements
+Content-Type: application/json
+
+{"product_id": 1, "type": "ADJUSTMENT", "quantity": 42, "reference": "CONTEO-2026-09"}
+
+###
+POST {{host}}/inventory/movements
+Content-Type: application/json
+
+{"product_id": 1, "type": "SHIPMENT", "quantity": 99999}
+
+###
+GET {{host}}/inventory/1
+
+###
+GET {{host}}/inventory/by-sku/P-100
+
+###
+GET {{host}}/inventory/1/movements
+
+###
+GET {{host}}/inventory/movements?date=2026-09-28
+
+###
+POST {{host}}/transfers/TR-demo01/reserve
+Content-Type: application/json
+
+{"sku": "P-100", "quantity": 10}
+
+###
+POST {{host}}/transfers/TR-demo01/reserve
+Content-Type: application/json
+
+{"sku": "P-100", "quantity": 10}
+
+###
+POST {{host}}/transfers/TR-demo01/release
+Content-Type: application/json
+
+{"sku": "P-100", "quantity": 10}
+
+###
+POST {{host}}/transfers/TR-demo01/commit-out
+Content-Type: application/json
+
+{"sku": "P-100", "quantity": 10}
+
+###
+POST {{host}}/transfers/TR-demo01/receive
+Content-Type: application/json
+
+{"sku": "P-100", "quantity": 10, "name": "Caja grande", "unit": "unidad", "category": "Empaque"}
