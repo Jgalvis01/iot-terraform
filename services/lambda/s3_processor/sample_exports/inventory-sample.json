@@ -1,0 +1,7 @@
+[
+  {"sku": "P-001", "warehouse_id": "WH-001", "quantity": 120},
+  {"sku": "P-002", "warehouse_id": "WH-002", "quantity": 45},
+  {"sku": "", "warehouse_id": "WH-001", "quantity": 10},
+  {"sku": "P-004", "warehouse_id": "BODEGA-9", "quantity": 5},
+  {"sku": "P-005", "warehouse_id": "WH-003", "quantity": -3}
+]

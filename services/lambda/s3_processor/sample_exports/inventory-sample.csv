@@ -1,0 +1,5 @@
+sku,warehouse_id,quantity
+P-001,WH-001,120
+P-002,WH-001,45
+P-003,WH-002,0
+P-001,WH-003,310
