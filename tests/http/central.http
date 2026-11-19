@@ -1,0 +1,83 @@
+###
+@central = http://localhost:8000
+
+###
+GET {{central}}/health
+
+###
+POST {{central}}/transfers
+Content-Type: application/json
+Idempotency-Key: demo-transfer-001
+X-Correlation-ID: COR-demo000001
+
+{"sku": "P-001", "source_warehouse": "WH-001", "destination_warehouse": "WH-002", "quantity": 5}
+
+###
+POST {{central}}/transfers
+Content-Type: application/json
+Idempotency-Key: demo-transfer-001
+
+{"sku": "P-001", "source_warehouse": "WH-001", "destination_warehouse": "WH-002", "quantity": 5}
+
+###
+POST {{central}}/transfers
+Content-Type: application/json
+
+{"sku": "P-001", "source_warehouse": "WH-001", "destination_warehouse": "WH-002", "quantity": 999999}
+
+###
+POST {{central}}/transfers
+Content-Type: application/json
+X-Fail-Step: after_reserve
+
+{"sku": "P-001", "source_warehouse": "WH-001", "destination_warehouse": "WH-003", "quantity": 1}
+
+###
+POST {{central}}/transfers
+Content-Type: application/json
+X-Fail-Step: destination_down
+
+{"sku": "P-001", "source_warehouse": "WH-001", "destination_warehouse": "WH-002", "quantity": 1}
+
+###
+POST {{central}}/transfers
+Content-Type: application/json
+X-Fail-Step: before_reserve
+
+{"sku": "P-001", "source_warehouse": "WH-001", "destination_warehouse": "WH-002", "quantity": 1}
+
+###
+GET {{central}}/transfers/TR-xxxxxxxx
+
+###
+GET {{central}}/transfers?limit=20
+
+###
+GET {{central}}/transfers?status=CANCELLED
+
+###
+GET {{central}}/global/inventory/P-001?mode=readmodel
+
+###
+GET {{central}}/global/inventory/P-001?mode=fanout
+
+###
+GET {{central}}/global/inventory
+
+###
+POST {{central}}/reports
+Content-Type: application/json
+
+{"report_type": "inventory_snapshot"}
+
+###
+GET {{central}}/reports/jobs/JOB-xxxxxxxx
+
+###
+GET {{central}}/audit?limit=50
+
+###
+GET {{central}}/audit?correlation_id=COR-demo000001
+
+###
+GET {{central}}/metrics
