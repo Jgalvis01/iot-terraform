@@ -1,0 +1,43 @@
+global:
+  scrape_interval: 5s
+scrape_configs:
+  - job_name: warehouse-api
+    static_configs:
+      - targets: ["wh-001-api:8000"]
+        labels: {warehouse: WH-001}
+      - targets: ["wh-002-api-1:8000", "wh-002-api-2:8000", "wh-002-api-3:8000"]
+        labels: {warehouse: WH-002}
+      - targets: ["wh-003-api:8000"]
+        labels: {warehouse: WH-003}
+  - job_name: central-api
+    static_configs:
+      - targets: ["central-api:8000"]
+  - job_name: workers
+    static_configs:
+      - targets:
+          - transfer-orchestrator:9100
+          - projection-worker:9100
+          - audit-worker:9100
+          - report-worker:9100
+          - wh-001-cache-worker:9100
+          - wh-002-cache-worker:9100
+          - wh-003-cache-worker:9100
+          - iot-storage-worker:9100
+          - iot-alert-worker:9100
+          - iot-simulator:9100
+          - iot-ingestion:9100
+  - job_name: rabbitmq
+    static_configs:
+      - targets: ["rabbitmq:15692"]
+  - job_name: rabbitmq-queues
+    metrics_path: /metrics/detailed
+    params:
+      family: [queue_coarse_metrics]
+    static_configs:
+      - targets: ["rabbitmq:15692"]
+  - job_name: redis
+    static_configs:
+      - targets: ["redis-exporter-wh-001:9121", "redis-exporter-wh-002:9121", "redis-exporter-wh-003:9121"]
+  - job_name: postgres
+    static_configs:
+      - targets: ["postgres-exporter-wh-001:9187", "postgres-exporter-wh-002:9187", "postgres-exporter-wh-003:9187", "postgres-exporter-central:9187"]

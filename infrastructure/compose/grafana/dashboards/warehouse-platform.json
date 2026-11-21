@@ -1,0 +1,327 @@
+{
+ "title": "Warehouse Cloud Platform",
+ "uid": "warehouse-platform",
+ "schemaVersion": 39,
+ "time": {
+  "from": "now-15m",
+  "to": "now"
+ },
+ "refresh": "5s",
+ "panels": [
+  {
+   "type": "timeseries",
+   "title": "API RPS por bodega",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 0,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "reqps"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum by (warehouse) (rate(http_requests_total{job=\"warehouse-api\"}[1m]))",
+     "legendFormat": "{{warehouse}}"
+    },
+    {
+     "refId": "B",
+     "expr": "sum(rate(http_requests_total{job=\"central-api\"}[1m]))",
+     "legendFormat": "central"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Latencia P50/P95/P99 (warehouse-api)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 0,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "histogram_quantile(0.50, sum by (le) (rate(http_request_duration_seconds_bucket{job=\"warehouse-api\"}[1m])))",
+     "legendFormat": "P50"
+    },
+    {
+     "refId": "B",
+     "expr": "histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{job=\"warehouse-api\"}[1m])))",
+     "legendFormat": "P95"
+    },
+    {
+     "refId": "C",
+     "expr": "histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket{job=\"warehouse-api\"}[1m])))",
+     "legendFormat": "P99"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Tasa de error 5xx",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 8,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum by (warehouse) (rate(http_requests_total{job=\"warehouse-api\",status=~\"5..\"}[1m])) / sum by (warehouse) (rate(http_requests_total{job=\"warehouse-api\"}[1m]))",
+     "legendFormat": "{{warehouse}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Distribuci\u00f3n por r\u00e9plica (WH-002)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 8,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "reqps"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum by (instance) (rate(http_requests_total{warehouse=\"WH-002\"}[1m]))",
+     "legendFormat": "{{instance}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Cache hit ratio (app)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 16,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum by (warehouse) (rate(cache_hits_total[1m])) / (sum by (warehouse) (rate(cache_hits_total[1m])) + sum by (warehouse) (rate(cache_misses_total[1m])))",
+     "legendFormat": "{{warehouse}}"
+    },
+    {
+     "refId": "B",
+     "expr": "sum by (warehouse) (rate(cache_errors_total[1m]))",
+     "legendFormat": "errores {{warehouse}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Redis memoria y hits",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 16,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "redis_memory_used_bytes",
+     "legendFormat": "mem {{instance}}"
+    },
+    {
+     "refId": "B",
+     "expr": "rate(redis_keyspace_hits_total[1m])",
+     "legendFormat": "hits {{instance}}"
+    },
+    {
+     "refId": "C",
+     "expr": "rate(redis_keyspace_misses_total[1m])",
+     "legendFormat": "misses {{instance}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "RabbitMQ profundidad de colas",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 24,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum by (queue) (rabbitmq_detailed_queue_messages_ready)",
+     "legendFormat": "{{queue}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Workers: procesados / reintentos / DLQ",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 24,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum by (consumer) (rate(worker_messages_processed_total[1m]))",
+     "legendFormat": "ok {{consumer}}"
+    },
+    {
+     "refId": "B",
+     "expr": "sum by (consumer) (rate(worker_messages_retried_total[1m]))",
+     "legendFormat": "retry {{consumer}}"
+    },
+    {
+     "refId": "C",
+     "expr": "sum by (consumer) (worker_messages_dlq_total)",
+     "legendFormat": "dlq {{consumer}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Workers: tiempo de procesamiento P95",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 32,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "histogram_quantile(0.95, sum by (le, consumer) (rate(worker_processing_seconds_bucket[1m])))",
+     "legendFormat": "{{consumer}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "PostgreSQL conexiones y locks",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 32,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum by (instance) (pg_stat_database_numbackends)",
+     "legendFormat": "conn {{instance}}"
+    },
+    {
+     "refId": "B",
+     "expr": "sum by (instance) (pg_locks_count)",
+     "legendFormat": "locks {{instance}}"
+    }
+   ]
+  }
+ ]
+}
