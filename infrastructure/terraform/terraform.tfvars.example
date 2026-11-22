@@ -1,0 +1,13 @@
+region       = "us-east-1"
+project_name = "warehouse-platform"
+
+my_ip_cidr = "203.0.113.10/32"
+
+key_name  = "vockey" # par de claves del Learner Lab (labsuser.pem)
+image_tag = "latest" # mismo tag usado en scripts/build_push_ecr.sh
+
+wh002_instances         = 2
+platform_instance_type  = "t3.medium"
+warehouse_instance_type = "t3.small"
+db_instance_class       = "db.t3.micro"
+log_retention_days      = 7

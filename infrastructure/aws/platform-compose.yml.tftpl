@@ -1,0 +1,144 @@
+name: warehouse-platform
+
+x-central-env: &central-env
+  DATABASE_URL: "${db_base_url}/central_read"
+  RABBITMQ_URL: "amqp://${rabbitmq_user}:${rabbitmq_password}@rabbitmq:5672/%2F"
+  WAREHOUSES: "${warehouses_env}"
+  S3_BUCKET: "${s3_bucket}"
+  S3_ENDPOINT_URL: ""
+  AWS_REGION: "${region}"
+  AWS_DEFAULT_REGION: "${region}"
+  STALE_AFTER_SECONDS: "60"
+  FAIL_INJECTION: "none"
+
+services:
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    hostname: rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: "${rabbitmq_user}"
+      RABBITMQ_DEFAULT_PASS: "${rabbitmq_password}"
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: "${region}"
+        awslogs-group: "${log_group_prefix}/rabbitmq"
+        awslogs-stream: "${instance_name}"
+        awslogs-create-group: "true"
+
+  central-api:
+    image: "${images.central_api}"
+    restart: unless-stopped
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      <<: *central-env
+      SERVICE_NAME: central-api
+    ports:
+      - "8000:8000"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: "${region}"
+        awslogs-group: "${log_group_prefix}/central-api"
+        awslogs-stream: "${instance_name}"
+        awslogs-create-group: "true"
+%{ for svc, module in central_workers ~}
+
+  ${svc}:
+    image: "${images.workers}"
+    restart: unless-stopped
+    command: ["python", "-m", "workers.${module}"]
+    environment:
+      <<: *central-env
+      SERVICE_NAME: ${svc}
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: "${region}"
+        awslogs-group: "${log_group_prefix}/${svc}"
+        awslogs-stream: "${instance_name}"
+        awslogs-create-group: "true"
+%{ endfor ~}
+%{ for wh in warehouses ~}
+
+  redis-${wh.slug}:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--protected-mode", "no", "--appendonly", "no", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
+    ports:
+      - "${wh.redis_port}:6379"
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: "${region}"
+        awslogs-group: "${log_group_prefix}/redis-${wh.slug}"
+        awslogs-stream: "${instance_name}"
+        awslogs-create-group: "true"
+
+  ${wh.slug}-outbox:
+    image: "${images.warehouse_api}"
+    restart: unless-stopped
+    command: ["python", "-m", "app.outbox_relay"]
+    healthcheck:
+      disable: true
+    environment:
+      WAREHOUSE_ID: "${wh.id}"
+      SERVICE_NAME: "${wh.slug}-outbox"
+      DATABASE_URL: "${db_base_url}/${wh.db}"
+      RABBITMQ_URL: "amqp://${rabbitmq_user}:${rabbitmq_password}@rabbitmq:5672/%2F"
+      EVENTS_ENABLED: "true"
+      CACHE_ENABLED: "false"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: "${region}"
+        awslogs-group: "${log_group_prefix}/${wh.slug}-outbox"
+        awslogs-stream: "${instance_name}"
+        awslogs-create-group: "true"
+
+  ${wh.slug}-cache-worker:
+    image: "${images.workers}"
+    restart: unless-stopped
+    command: ["python", "-m", "workers.cache"]
+    environment:
+      WAREHOUSE_ID: "${wh.id}"
+      SERVICE_NAME: "${wh.slug}-cache-worker"
+      REDIS_URL: "redis://redis-${wh.slug}:6379/0"
+      RABBITMQ_URL: "amqp://${rabbitmq_user}:${rabbitmq_password}@rabbitmq:5672/%2F"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis-${wh.slug}:
+        condition: service_started
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: "${region}"
+        awslogs-group: "${log_group_prefix}/${wh.slug}-cache-worker"
+        awslogs-stream: "${instance_name}"
+        awslogs-create-group: "true"
+%{ endfor ~}
+
+volumes:
+  rabbitmq-data:

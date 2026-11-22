@@ -1,0 +1,29 @@
+name: warehouse-${instance_name}
+
+services:
+%{ for wh in warehouses ~}
+  ${wh.slug}-api:
+    image: "${images.warehouse_api}"
+    restart: unless-stopped
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      WAREHOUSE_ID: "${wh.id}"
+      SERVICE_NAME: "${wh.slug}-api"
+      DATABASE_URL: "${db_base_url}/${wh.db}"
+      REDIS_URL: "redis://${platform_ip}:${wh.redis_port}/0"
+      CACHE_ENABLED: "true"
+      CACHE_TTL_SECONDS: "30"
+      RABBITMQ_URL: "${rabbitmq_url}"
+      EVENTS_ENABLED: "true"
+      AWS_REGION: "${region}"
+    ports:
+      - "${wh.api_port}:8000"
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: "${region}"
+        awslogs-group: "${log_group_prefix}/${wh.slug}-api"
+        awslogs-stream: "${instance_name}"
+        awslogs-create-group: "true"
+
+%{ endfor ~}
