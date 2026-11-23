@@ -1,4 +1,5 @@
 #!/bin/bash
+# Bootstrap de la EC2 de la bodega ${warehouse_id}: instala Docker + compose y levanta los servicios.
 set -euxo pipefail
 exec > >(tee -a /var/log/warehouse-bootstrap.log) 2>&1
 
@@ -6,23 +7,31 @@ REGION="${region}"
 REGISTRY="${ecr_registry}"
 APP_DIR=/opt/warehouse
 
-# instalar docker
-dnf install -y docker
+# --- Docker (AL2023) + utilidades de diagnóstico (nc para pruebas de conectividad)
+for i in $(seq 1 10); do
+  dnf install -y docker nmap-ncat jq && break
+  echo "dnf falló (intento $i), reintentando..."; sleep 15
+done
 systemctl enable --now docker
 usermod -aG docker ec2-user
+systemctl enable --now amazon-ssm-agent || true
 
 mkdir -p /usr/local/lib/docker/cli-plugins
-curl -fsSL --retry 5 \
+curl -fsSL --retry 10 --retry-delay 5 \
   "https://github.com/docker/compose/releases/download/${compose_version}/docker-compose-linux-x86_64" \
   -o /usr/local/lib/docker/cli-plugins/docker-compose
 chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+docker version
 docker compose version
 
-mkdir -p "$APP_DIR"
+# --- Datos persistentes de la bodega (sobreviven a reinicios de contenedores y de la EC2)
+mkdir -p "$APP_DIR/pgdata"
+
 cat > "$APP_DIR/docker-compose.yml" <<'COMPOSE_EOF'
 ${compose}
 COMPOSE_EOF
 chmod 600 "$APP_DIR/docker-compose.yml"
+echo "${warehouse_id}" > "$APP_DIR/WAREHOUSE_ID"
 
 cat > "$APP_DIR/redeploy.sh" <<REDEPLOY_EOF
 #!/bin/bash
@@ -37,30 +46,6 @@ docker compose up -d --remove-orphans
 docker compose ps
 REDEPLOY_EOF
 chmod 755 "$APP_DIR/redeploy.sh"
-
-%{ if init_databases ~}
-PGIMG=postgres:15-alpine
-set +x
-export PGPASSWORD='${db_password}'
-set -x
-psql_rds() {
-  docker run --rm -i -e PGPASSWORD "$PGIMG" \
-    psql -h "${db_address}" -p "${db_port}" -U "${db_username}" -d postgres -v ON_ERROR_STOP=1 "$@"
-}
-for i in $(seq 1 60); do
-  docker run --rm -e PGPASSWORD "$PGIMG" pg_isready -h "${db_address}" -p "${db_port}" -U "${db_username}" && break
-  echo "RDS no disponible aún (intento $i)"; sleep 10
-done
-for db in ${join(" ", databases)}; do
-  if [ "$(psql_rds -tAc "SELECT 1 FROM pg_database WHERE datname='$db'")" != "1" ]; then
-    psql_rds -c "CREATE DATABASE $db"
-    echo "Base $db creada"
-  else
-    echo "Base $db ya existe"
-  fi
-done
-unset PGPASSWORD
-%{ endif ~}
 
 cd "$APP_DIR"
 for i in $(seq 1 10); do

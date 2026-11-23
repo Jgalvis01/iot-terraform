@@ -1,29 +1,122 @@
-name: warehouse-${instance_name}
+name: ${slug}
+
+# Cada servicio envía sus logs a CloudWatch: ${log_group_prefix}/${slug}-<servicio>
+x-logging: &default-logging
+  driver: awslogs
+
+x-wh-env: &wh-env
+  WAREHOUSE_ID: "${warehouse_id}"
+  DATABASE_URL: "postgresql://warehouse:${db_password}@postgres:5432/${db_name}"
+  REDIS_URL: "redis://redis:6379/0"
+  RABBITMQ_URL: "${rabbitmq_url}"
+  EVENTS_ENABLED: "true"
+  AWS_REGION: "${region}"
 
 services:
-%{ for wh in warehouses ~}
-  ${wh.slug}-api:
-    image: "${images.warehouse_api}"
+  # Base de datos propia de la bodega (ADR-001): nada se comparte con otras bodegas.
+  postgres:
+    image: "${postgres_image}"
     restart: unless-stopped
-    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+    command: ["postgres", "-c", "max_connections=200", "-c", "shared_buffers=128MB"]
     environment:
-      WAREHOUSE_ID: "${wh.id}"
-      SERVICE_NAME: "${wh.slug}-api"
-      DATABASE_URL: "${db_base_url}/${wh.db}"
-      REDIS_URL: "redis://${platform_ip}:${wh.redis_port}/0"
-      CACHE_ENABLED: "true"
-      CACHE_TTL_SECONDS: "30"
-      RABBITMQ_URL: "${rabbitmq_url}"
-      EVENTS_ENABLED: "true"
-      AWS_REGION: "${region}"
-    ports:
-      - "${wh.api_port}:8000"
+      POSTGRES_USER: warehouse
+      POSTGRES_PASSWORD: "${db_password}"
+      POSTGRES_DB: "${db_name}"
+    volumes:
+      - /opt/warehouse/pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U warehouse -d ${db_name}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
     logging:
-      driver: awslogs
+      <<: *default-logging
       options:
         awslogs-region: "${region}"
-        awslogs-group: "${log_group_prefix}/${wh.slug}-api"
-        awslogs-stream: "${instance_name}"
+        awslogs-group: "${log_group_prefix}/${slug}-postgres"
+        awslogs-stream: "${slug}"
         awslogs-create-group: "true"
 
-%{ endfor ~}
+  redis:
+    image: "${redis_image}"
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "no", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
+    logging:
+      <<: *default-logging
+      options:
+        awslogs-region: "${region}"
+        awslogs-group: "${log_group_prefix}/${slug}-redis"
+        awslogs-stream: "${slug}"
+        awslogs-create-group: "true"
+
+  api:
+    image: "${warehouse_image}"
+    restart: unless-stopped
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "${api_workers}"]
+    environment:
+      <<: *wh-env
+      SERVICE_NAME: "${slug}-api"
+      CACHE_ENABLED: "true"
+      CACHE_TTL_SECONDS: "30"
+    ports:
+      - "${api_port}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    logging:
+      <<: *default-logging
+      options:
+        awslogs-region: "${region}"
+        awslogs-group: "${log_group_prefix}/${slug}-api"
+        awslogs-stream: "${slug}"
+        awslogs-create-group: "true"
+
+  # Cola local durable (tabla outbox en PostgreSQL). Si el broker o la red hacia la
+  # central se caen, los eventos se acumulan aquí y se envían al reconectar; después
+  # se publica un snapshot completo para resincronizar la bodega con la central.
+  outbox:
+    image: "${warehouse_image}"
+    restart: unless-stopped
+    command: ["python", "-m", "app.outbox_relay"]
+    deploy:
+      replicas: ${relay_replicas}
+    healthcheck:
+      disable: true
+    environment:
+      <<: *wh-env
+      SERVICE_NAME: "${slug}-outbox"
+      CACHE_ENABLED: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_started
+    logging:
+      <<: *default-logging
+      options:
+        awslogs-region: "${region}"
+        awslogs-group: "${log_group_prefix}/${slug}-outbox"
+        awslogs-stream: "${slug}"
+        awslogs-create-group: "true"
+
+  cache-worker:
+    image: "${workers_image}"
+    restart: unless-stopped
+    command: ["python", "-m", "workers.cache"]
+    environment:
+      WAREHOUSE_ID: "${warehouse_id}"
+      SERVICE_NAME: "${slug}-cache-worker"
+      REDIS_URL: "redis://redis:6379/0"
+      RABBITMQ_URL: "${rabbitmq_url}"
+    depends_on:
+      redis:
+        condition: service_started
+    logging:
+      <<: *default-logging
+      options:
+        awslogs-region: "${region}"
+        awslogs-group: "${log_group_prefix}/${slug}-cache-worker"
+        awslogs-stream: "${slug}"
+        awslogs-create-group: "true"
