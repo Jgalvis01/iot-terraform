@@ -166,4 +166,5 @@ Los NAT Gateways cobran aunque las EC2 estén paradas: si no vas a usar el entor
 | Targets de bodega `unhealthy` justo tras el apply | Bootstrap en curso (3-5 min) o imágenes ausentes en ECR → `build_push_ecr.sh` y en la EC2 `sudo /opt/warehouse/redeploy.sh` (por SSM) |
 | Tareas ECS en `PROVISIONING`/`STOPPED` con `CannotPullContainerError` | Imágenes no publicadas en ECR o NAT aún no disponible; ECS reintenta solo |
 | `aws_verify.sh` falla en las secciones 4-5 (SSM) | El agente SSM tarda unos minutos en registrarse; si el lab no permite SSM, prueba el aislamiento con `GET /warehouses/connectivity` y revisa SG/NACL/rutas (secciones 1-3) |
+| `AccessDenied ... s3:GetBucketObjectLockConfiguration` | SCP del Learner Lab. Por eso el bucket se crea con AWS CLI (`s3_create_with_cli = true`, por defecto); fuera del lab puede usarse `false` |
 | La consola RabbitMQ no abre | Tu IP cambió: actualiza `my_ip_cidr` y `terraform apply` |

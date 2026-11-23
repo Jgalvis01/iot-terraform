@@ -44,7 +44,8 @@ mock_provider "aws" {
 }
 
 variables {
-  my_ip_cidr = "203.0.113.10/32"
+  my_ip_cidr         = "203.0.113.10/32"
+  s3_create_with_cli = false # en las pruebas no se ejecuta AWS CLI
 }
 
 run "topologia_completa" {

@@ -9,3 +9,14 @@ variable "expire_days" {
   type        = number
   default     = 30
 }
+
+variable "create_with_cli" {
+  description = "Crear el bucket con AWS CLI (necesario en Learner Lab por su SCP sobre S3 Object Lock)."
+  type        = bool
+  default     = true
+}
+
+variable "region" {
+  type    = string
+  default = "us-east-1"
+}

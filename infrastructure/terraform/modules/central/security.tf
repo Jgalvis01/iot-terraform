@@ -40,7 +40,7 @@ resource "aws_vpc_security_group_ingress_rule" "alb_rabbit_ui" {
 
 resource "aws_vpc_security_group_egress_rule" "alb_to_central" {
   security_group_id = aws_security_group.alb.id
-  description       = "ALB -> tareas ECS de la central"
+  description       = "ALB hacia tareas ECS de la central"
   cidr_ipv4         = var.vpc_cidr
   ip_protocol       = "-1"
 }
@@ -49,7 +49,7 @@ resource "aws_vpc_security_group_egress_rule" "alb_to_warehouses" {
   for_each = var.warehouses
 
   security_group_id = aws_security_group.alb.id
-  description       = "ALB -> API de ${each.key} por peering"
+  description       = "ALB hacia API de ${each.key} por peering"
   cidr_ipv4         = each.value.cidr
   ip_protocol       = "tcp"
   from_port         = each.value.api_port
@@ -66,7 +66,7 @@ resource "aws_security_group" "tasks" {
 
 resource "aws_vpc_security_group_ingress_rule" "tasks_api_from_alb" {
   security_group_id            = aws_security_group.tasks.id
-  description                  = "ALB -> central-api"
+  description                  = "ALB hacia central-api"
   referenced_security_group_id = aws_security_group.alb.id
   ip_protocol                  = "tcp"
   from_port                    = 8000
@@ -75,7 +75,7 @@ resource "aws_vpc_security_group_ingress_rule" "tasks_api_from_alb" {
 
 resource "aws_vpc_security_group_ingress_rule" "tasks_rabbit_ui_from_alb" {
   security_group_id            = aws_security_group.tasks.id
-  description                  = "ALB -> consola RabbitMQ"
+  description                  = "ALB hacia consola RabbitMQ"
   referenced_security_group_id = aws_security_group.alb.id
   ip_protocol                  = "tcp"
   from_port                    = 15672

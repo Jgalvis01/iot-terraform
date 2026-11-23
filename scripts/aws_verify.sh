@@ -33,6 +33,7 @@ try: r=eval(sys.argv[1])
 except Exception: r=""
 print(json.dumps(r) if isinstance(r,(dict,list)) else ("" if r is None else r))' "$1"; }
 http_code() { curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$@"; }
+eq() { [ "$("${@:2}")" = "$1" ]; } # eq <esperado> <comando...>: re-ejecuta el comando en cada intento
 wait_until() { # wait_until <segundos> <comando...>
   local timeout="$1"; shift; local start=$SECONDS
   until "$@" >/dev/null 2>&1; do
@@ -210,7 +211,7 @@ check "$FIRST: entrada de 10 unidades (201)" test "$code" = 201
 global_total() { curl -s --max-time 5 "http://$ALB/global/inventory/$1" | jget 'd["total"]'; }
 wh_qty() { # wh_qty <sku> <WH> -> cantidad de esa bodega en el read model de la central
   curl -s --max-time 5 "http://$ALB/global/inventory/$1" | jget "[w['quantity'] for w in d['warehouses'] if w['warehouse_id']=='$2'][0]"; }
-if wait_until 90 test "$(global_total "$SKU")" = 10; then
+if wait_until 90 eq 10 global_total "$SKU"; then
   ok "sincronización bodega -> broker -> central: total global de $SKU = 10"
 else
   bad "la central no recibió el inventario de $SKU (total=$(global_total "$SKU"))"
@@ -221,7 +222,7 @@ online="$(jget 'd["totals"]["online"]' <<<"$rep")"
   || bad "reporte de bodegas: online=$online"
 job="$(curl -s --max-time 10 -X POST "http://$ALB/reports" -H 'Content-Type: application/json' -d '{"report_type":"warehouses_summary"}' | jget 'd["job_id"]')"
 job_status() { curl -s --max-time 5 "http://$ALB/reports/jobs/$job" | jget 'd["status"]'; }
-if [[ -n "$job" ]] && wait_until 90 test "$(job_status)" = COMPLETED; then
+if [[ -n "$job" ]] && wait_until 90 eq COMPLETED job_status; then
   key="$(curl -s "http://$ALB/reports/jobs/$job" | jget 'd["s3_key"]')"
   check "reporte $job en S3 (s3://$BUCKET/$key)" aws s3api head-object --bucket "$BUCKET" --key "$key"
 else
@@ -238,12 +239,20 @@ if $CHAOS; then
   done
   curl -s -o /dev/null -X POST "${WH_URL[$WH2]}/inventory/movements" -H 'Content-Type: application/json' \
     -d "{\"sku\":\"$SKU2\",\"type\":\"RECEIPT\",\"quantity\":20,\"reference\":\"chaos-seed\"}"
-  wait_until 90 test "$(global_total "$SKU2")" = 20 && ok "estado inicial sincronizado ($SKU2 = 20)" || bad "estado inicial no sincronizado"
+  wait_until 90 eq 20 eval 'global_total "$SKU2"' && ok "estado inicial sincronizado ($SKU2 = 20)" || bad "estado inicial no sincronizado"
 
   echo "  -> deteniendo el broker (rabbitmq desired=0)"
   aws ecs update-service --cluster "$CLUSTER" --service rabbitmq --desired-count 0 >/dev/null
   aws ecs wait services-stable --cluster "$CLUSTER" --services rabbitmq
-  sleep 10
+  # services-stable vuelve antes de que la tarea termine de pararse (drenaje del NLB + stopTimeout)
+  broker_down() {
+    local arns; arns="$(aws_t ecs list-tasks --cluster "$CLUSTER" --service-name rabbitmq --desired-status STOPPED --query 'taskArns' | xargs)"
+    [[ -z "$(aws_t ecs list-tasks --cluster "$CLUSTER" --service-name rabbitmq --desired-status RUNNING --query 'taskArns')" ]] || return 1
+    [[ -z "$arns" ]] && return 0
+    [[ "$(aws_t ecs describe-tasks --cluster "$CLUSTER" --tasks $arns --query 'length(tasks[?lastStatus!=`STOPPED`])')" == 0 ]]
+  }
+  wait_until 180 broker_down && ok "tarea del broker detenida" || bad "la tarea del broker no terminó de pararse"
+  sleep 5
   ok_moves=0
   for i in 1 2 3 4 5; do
     [[ "$(http_code -X POST "${WH_URL[$WH2]}/inventory/movements" -H 'Content-Type: application/json' \
@@ -263,16 +272,16 @@ if $CHAOS; then
   echo "  -> arrancando el broker (rabbitmq desired=1)"
   aws ecs update-service --cluster "$CLUSTER" --service rabbitmq --desired-count 1 >/dev/null
   aws ecs wait services-stable --cluster "$CLUSTER" --services rabbitmq
-  wait_until 240 test "$(curl -s "${WH_URL[$WH2]}/sync/status" | jget 'd["outbox_pending"]')" = 0 \
+  wait_until 240 eq 0 eval 'curl -s "${WH_URL[$WH2]}/sync/status" | jget '"'"'d["outbox_pending"]'"'"'' \
     && ok "$WH2 vació su cola local al reconectar" || bad "$WH2 no vació el outbox"
-  wait_until 180 test "$(curl -s "http://$ALB/health" | jget 'd["pending_commands"]')" = 0 \
+  wait_until 180 eq 0 eval 'curl -s "http://$ALB/health" | jget '"'"'d["pending_commands"]'"'"'' \
     && ok "command-relay publicó los comandos encolados" || bad "quedan comandos en command_outbox"
   tstatus() { curl -s "http://$ALB/transfers/$TR_ID" | jget 'd["status"]'; }
-  wait_until 180 test "$(tstatus)" = COMPLETED && ok "transferencia $TR_ID COMPLETED tras reanudarse el broker" \
+  wait_until 180 eq COMPLETED eval 'tstatus' && ok "transferencia $TR_ID COMPLETED tras reanudarse el broker" \
     || bad "transferencia $TR_ID estado=$(tstatus)"
-  wait_until 180 test "$(wh_qty "$SKU2" "$WH2")" = 27 \
+  wait_until 180 eq 27 eval 'wh_qty "$SKU2" "$WH2"' \
     && ok "central sincronizada tras la caída: $WH2 = 20 + 10 - 3 = 27" || bad "$WH2 = $(wh_qty "$SKU2" "$WH2") (esperado 27)"
-  wait_until 120 test "$(wh_qty "$SKU2" "$WH3")" = 3 \
+  wait_until 120 eq 3 eval 'wh_qty "$SKU2" "$WH3"' \
     && ok "central sincronizada tras la caída: $WH3 = 3 (recibido por transferencia)" || bad "$WH3 = $(wh_qty "$SKU2" "$WH3") (esperado 3)"
   snap="$(curl -s "http://$ALB/reports/warehouses" | jget "[w for w in d['warehouses'] if w['warehouse_id']=='$WH2'][0]['sync']['last_snapshot_at']")"
   [[ -n "$snap" ]] && ok "$WH2 envió snapshot de resincronización ($snap)" || bad "no se registró snapshot de $WH2"
@@ -291,7 +300,7 @@ if $CHAOS; then
   aws ecs wait services-stable --cluster "$CLUSTER" --services rabbitmq
   aws ecs update-service --cluster "$CLUSTER" --service projection-worker --desired-count "${PROJ_COUNT:-1}" >/dev/null
   aws ecs wait services-stable --cluster "$CLUSTER" --services projection-worker
-  wait_until 180 test "$(wh_qty "$SKU2" "$WH3")" = 6 \
+  wait_until 180 eq 6 eval 'wh_qty "$SKU2" "$WH3"' \
     && ok "eventos que estaban en cola antes del reinicio del broker se procesaron ($WH3 = 3 + 3 = 6)" \
     || bad "eventos perdidos tras reiniciar el broker ($WH3 = $(wh_qty "$SKU2" "$WH3"), esperado 6)"
 fi

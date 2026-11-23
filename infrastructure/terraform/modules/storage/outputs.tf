@@ -1,9 +1,9 @@
 output "bucket_name" {
-  value = aws_s3_bucket.this.id
+  value = local.bucket_id
 }
 
 output "bucket_arn" {
-  value = aws_s3_bucket.this.arn
+  value = local.bucket_arn
 }
 
 output "prefixes" {

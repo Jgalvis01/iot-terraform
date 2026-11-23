@@ -112,8 +112,10 @@ module "ecr" {
 }
 
 module "storage" {
-  source        = "./modules/storage"
-  bucket_prefix = var.project_name
+  source          = "./modules/storage"
+  bucket_prefix   = var.project_name
+  region          = var.region
+  create_with_cli = var.s3_create_with_cli
 }
 
 module "database" {

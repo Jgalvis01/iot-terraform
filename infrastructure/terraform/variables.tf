@@ -173,3 +173,9 @@ variable "lab_instance_profile_name" {
   type    = string
   default = "LabInstanceProfile"
 }
+
+variable "s3_create_with_cli" {
+  description = "Crear el bucket S3 con AWS CLI: Learner Lab deniega s3:GetBucketObjectLockConfiguration, que el recurso nativo necesita."
+  type        = bool
+  default     = true
+}
