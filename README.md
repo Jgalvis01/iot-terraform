@@ -134,6 +134,7 @@ Procedimiento, costes y operación en `docs/aws-deployment.md`.
 
 | Entregable | Ubicación |
 |---|---|
+| **Guía completa (para entender todo el proyecto)** | `docs/guia-completa.md` |
 | Arquitectura | `docs/architecture.md` |
 | Decisiones de arquitectura (ADRs) | `docs/adr/ADR-001` … `ADR-014` |
 | Backend | `services/warehouse-api`, `services/central-api`, `services/workers`, `libs/wcommon` |
