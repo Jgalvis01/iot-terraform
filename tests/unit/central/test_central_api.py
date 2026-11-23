@@ -84,14 +84,50 @@ def test_idempotency_key(client):
     assert r.status_code == 409
 
 
-def test_broker_down_returns_503_without_orphan(client):
+def test_broker_down_queues_command_and_relay_flushes(client):
+    from app.command_outbox import relay_commands
+    from app.models import CommandOutbox
     client.pub.down = True
     r = client.post("/transfers", json=BODY, headers={"Idempotency-Key": "k-2"})
+    assert r.status_code == 202 and r.json()["delivery"] == "queued"
+    tid = r.json()["transfer_id"]
+    assert client.get(f"/transfers/{tid}").json()["status"] == "REQUESTED"
+    assert client.get("/health").json()["pending_commands"] == 1
+    with session() as s:
+        row = s.query(CommandOutbox).one()
+        assert row.routing_key == "transfer.process" and row.payload["payload"] == {"transfer_id": tid}
+        assert row.published_at is None
+
+    def boom(rk, msg):
+        raise ConnectionError("broker sigue caído")
+
+    with session() as s:
+        with pytest.raises(ConnectionError):
+            relay_commands(s, boom)
+    with session() as s:
+        assert s.query(CommandOutbox).one().attempts == 1
+    sent = []
+    with session() as s:
+        assert relay_commands(s, lambda rk, m: sent.append((rk, m["payload"]))) == 1
+        assert relay_commands(s, lambda rk, m: sent.append("again")) == 0
+    assert sent == [("transfer.process", {"transfer_id": tid})]
+    assert client.get("/health").json()["pending_commands"] == 0
+    client.pub.down = False
+    again = client.post("/transfers", json=BODY, headers={"Idempotency-Key": "k-2"}).json()
+    assert again["transfer_id"] == tid and again["idempotent_replay"] is True
+
+
+def test_broker_and_queue_down_returns_503_without_orphan(client, monkeypatch):
+    import app.routers.transfers as tr
+
+    def fail(*a, **kw):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(tr, "publish_or_queue", fail)
+    r = client.post("/transfers", json=BODY)
     assert r.status_code == 503 and r.json()["code"] == "BROKER_UNAVAILABLE"
     with session() as s:
         assert s.query(Transfer).count() == 0
-    client.pub.down = False
-    assert client.post("/transfers", json=BODY, headers={"Idempotency-Key": "k-2"}).status_code == 202
 
 
 @pytest.mark.parametrize("body,headers", [
@@ -154,7 +190,8 @@ def test_reports_and_audit(client):
     assert client.get(f"/reports/jobs/{job_id}").json()["status"] == "PROCESSING"
     assert client.post("/reports", json={"report_type": "nope"}).status_code == 422
     client.pub.down = True
-    assert client.post("/reports", json={}).status_code == 503
+    queued = client.post("/reports", json={})
+    assert queued.status_code == 202 and queued.json()["delivery"] == "queued"
     assert client.get("/audit?limit=5").json() == []
 
 

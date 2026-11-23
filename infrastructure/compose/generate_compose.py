@@ -111,6 +111,13 @@ services["central-api"] = {
     "ports": ["8000:8000"], "environment": {**central_env, "SERVICE_NAME": "central-api"},
     "depends_on": dep_central, "profiles": ["central"], "restart": "unless-stopped",
 }
+# cola de respaldo de la central: publica los comandos guardados mientras el broker estaba caído
+services["command-relay"] = {
+    "image": "central-api:local", "command": ["python", "-m", "app.command_relay"],
+    "environment": {**central_env, "SERVICE_NAME": "command-relay"},
+    "depends_on": {"central-db": {"condition": "service_healthy"}, "central-api": {"condition": "service_started"}},
+    "healthcheck": {"disable": True}, "profiles": ["central"], "restart": "unless-stopped",
+}
 workers = {
     "transfer-orchestrator": ("transfer_orchestrator", ["central"], {"FAIL_INJECTION": "${FAIL_INJECTION:-none}"}),
     "projection-worker": ("projection", ["central"], {}),

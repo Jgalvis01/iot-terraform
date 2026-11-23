@@ -606,6 +606,41 @@
       ],
       "restart": "unless-stopped"
     },
+    "command-relay": {
+      "image": "central-api:local",
+      "command": [
+        "python",
+        "-m",
+        "app.command_relay"
+      ],
+      "environment": {
+        "DATABASE_URL": "postgresql://postgres:postgres@central-db:5432/central_read",
+        "RABBITMQ_URL": "amqp://guest:guest@rabbitmq:5672/%2F",
+        "WAREHOUSES": "WH-001=http://wh-001-api:8000,WH-002=http://wh-002-lb:80,WH-003=http://wh-003-api:8000",
+        "STALE_AFTER_SECONDS": "60",
+        "S3_BUCKET": "warehouse-platform",
+        "S3_ENDPOINT_URL": "http://s3:9090",
+        "AWS_REGION": "us-east-1",
+        "AWS_ACCESS_KEY_ID": "test",
+        "AWS_SECRET_ACCESS_KEY": "test",
+        "SERVICE_NAME": "command-relay"
+      },
+      "depends_on": {
+        "central-db": {
+          "condition": "service_healthy"
+        },
+        "central-api": {
+          "condition": "service_started"
+        }
+      },
+      "healthcheck": {
+        "disable": true
+      },
+      "profiles": [
+        "central"
+      ],
+      "restart": "unless-stopped"
+    },
     "transfer-orchestrator": {
       "image": "workers:local",
       "command": [

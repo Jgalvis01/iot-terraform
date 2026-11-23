@@ -15,6 +15,7 @@ from wcommon.logging import log
 from app.config import get_settings
 from app.database import get_db, iso
 from app.models import Transfer, utcnow
+from app.command_outbox import QUEUED, publish_or_queue
 from app.publisher import PublishError, get_publisher
 
 router = APIRouter(tags=["transfers"])
@@ -45,16 +46,21 @@ def transfer_to_dict(t: Transfer) -> dict:
             "created_at": iso(t.created_at), "updated_at": iso(t.updated_at)}
 
 
-def _accepted(t: Transfer, replay: bool = False) -> JSONResponse:
-    return JSONResponse(status_code=202, content={
-        "transfer_id": t.transfer_id, "status": "PROCESSING", "saga_status": t.status,
-        "idempotent_replay": replay})
+def _accepted(t: Transfer, replay: bool = False, delivery: str | None = None) -> JSONResponse:
+    content = {"transfer_id": t.transfer_id, "status": "PROCESSING", "saga_status": t.status,
+               "idempotent_replay": replay}
+    if delivery is not None:
+        content["delivery"] = delivery
+    return JSONResponse(status_code=202, content=content)
+
+
+def _process_command(t: Transfer) -> dict:
+    return build_event("PROCESS_TRANSFER", "central-api", {"transfer_id": t.transfer_id},
+                       correlation_id=t.correlation_id)
 
 
 def _publish_process(publisher, t: Transfer) -> None:
-    cmd = build_event("PROCESS_TRANSFER", "central-api", {"transfer_id": t.transfer_id},
-                      correlation_id=t.correlation_id)
-    publisher.publish_command("transfer.process", cmd)
+    publisher.publish_command("transfer.process", _process_command(t))
 
 
 @router.post("/transfers", status_code=202)
@@ -91,20 +97,24 @@ def create_transfer(body: TransferIn, db: Session = Depends(get_db), publisher=D
         existing = db.execute(select(Transfer).where(Transfer.idempotency_key == idempotency_key)).scalar_one()
         return _replay(existing, body, publisher)
 
+    # si el broker está caído el comando va a la cola de respaldo (command_outbox) y se acepta igual
     try:
-        _publish_process(publisher, t)
-    except PublishError as exc:
+        delivery = publish_or_queue(db, publisher, "transfer.process", _process_command(t))
+    except Exception as exc:
+        db.rollback()
         PUBLISH_FAILURES.labels("PROCESS_TRANSFER").inc()
         db.delete(t)
         db.commit()
-        log("transfer_rejected_broker_down", level="ERROR", transfer_id=t.transfer_id, error=str(exc))
+        log("transfer_rejected_broker_and_queue_down", level="ERROR", transfer_id=t.transfer_id, error=repr(exc))
         return JSONResponse(status_code=503, content={
-            "detail": "RabbitMQ no disponible; la transferencia no fue creada. Reintente.",
+            "detail": "Broker y cola de respaldo no disponibles; la transferencia no fue creada. Reintente.",
             "code": "BROKER_UNAVAILABLE"}, headers={"Retry-After": "5"})
+    if delivery == QUEUED:
+        PUBLISH_FAILURES.labels("PROCESS_TRANSFER").inc()
     TRANSFERS_CREATED.inc()
     log("transfer_requested", transfer_id=t.transfer_id, sku=t.sku, source=t.source_warehouse,
-        destination=t.destination_warehouse, quantity=t.quantity, fail_step=fail_step)
-    return _accepted(t)
+        destination=t.destination_warehouse, quantity=t.quantity, fail_step=fail_step, delivery=delivery)
+    return _accepted(t, delivery=delivery)
 
 
 def _replay(existing: Transfer, body: TransferIn, publisher):

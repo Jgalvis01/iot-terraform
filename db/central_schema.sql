@@ -32,6 +32,28 @@ CREATE TABLE IF NOT EXISTS warehouse_status (
     last_event_at  TIMESTAMPTZ
 );
 
+CREATE TABLE IF NOT EXISTS warehouse_sync (
+    warehouse_id       VARCHAR(16) PRIMARY KEY,
+    last_heartbeat_at  TIMESTAMPTZ,
+    outbox_pending     INTEGER     NOT NULL DEFAULT 0,
+    oldest_pending_at  TIMESTAMPTZ,
+    last_snapshot_at   TIMESTAMPTZ,
+    last_snapshot_id   VARCHAR(64),
+    snapshot_items     INTEGER     NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS command_outbox (
+    id            BIGSERIAL   PRIMARY KEY,
+    event_id      VARCHAR(64) NOT NULL UNIQUE,
+    routing_key   VARCHAR(64) NOT NULL,
+    payload       JSONB       NOT NULL,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    published_at  TIMESTAMPTZ,
+    attempts      INTEGER     NOT NULL DEFAULT 0,
+    last_error    TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_command_outbox_published_at ON command_outbox (published_at);
+
 CREATE TABLE IF NOT EXISTS processed_events (
     event_id      VARCHAR     NOT NULL,
     consumer      VARCHAR     NOT NULL,

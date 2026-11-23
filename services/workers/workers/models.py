@@ -48,6 +48,31 @@ class WarehouseStatus(Base):
     last_event_at = Column(DateTime(timezone=True), nullable=True)
 
 
+class WarehouseSync(Base):
+    """Estado de sincronización de cada bodega (heartbeats y snapshots del outbox relay)."""
+    __tablename__ = "warehouse_sync"
+    warehouse_id = Column(String(16), primary_key=True)
+    last_heartbeat_at = Column(DateTime(timezone=True), nullable=True)
+    outbox_pending = Column(Integer, nullable=False, default=0)
+    oldest_pending_at = Column(DateTime(timezone=True), nullable=True)
+    last_snapshot_at = Column(DateTime(timezone=True), nullable=True)
+    last_snapshot_id = Column(String(64), nullable=True)
+    snapshot_items = Column(Integer, nullable=False, default=0)
+
+
+class CommandOutbox(Base):
+    """Cola de respaldo de la central: comandos que no se pudieron publicar porque el broker estaba caído."""
+    __tablename__ = "command_outbox"
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    event_id = Column(String(64), nullable=False, unique=True)
+    routing_key = Column(String(64), nullable=False)
+    payload = Column(JSONType, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+    published_at = Column(DateTime(timezone=True), nullable=True, index=True)
+    attempts = Column(Integer, nullable=False, default=0)
+    last_error = Column(Text, nullable=True)
+
+
 class ReportJob(Base):
     __tablename__ = "report_jobs"
     job_id = Column(String(32), primary_key=True)

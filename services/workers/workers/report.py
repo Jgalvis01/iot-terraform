@@ -8,11 +8,15 @@ from wcommon.events import build_event, validate_event
 from wcommon.logging import log
 from wcommon.rabbit import EVENTS_EXCHANGE, MAX_RETRIES
 
+from wcommon.reports import warehouses_summary
+
+from workers.config import env_int, parse_warehouses
 from workers.db import as_utc
-from workers.models import GlobalInventory, ReportJob, WarehouseStatus, utcnow
+from workers.models import (CommandOutbox, GlobalInventory, ReportJob, Transfer, WarehouseStatus, WarehouseSync,
+                            utcnow)
 
 CONSUMER = "report"
-SUPPORTED = {"inventory_snapshot"}
+SUPPORTED = {"inventory_snapshot", "warehouses_summary"}
 
 
 def make_s3_client():
@@ -39,6 +43,27 @@ def build_snapshot(session, job_id: str, report_type: str) -> dict:
             "source": "central global_inventory (read model, eventual consistency)",
             "warehouse_last_event_at": {k: _iso(v) for k, v in statuses.items()},
             "sku_count": len(by_sku), "items": list(by_sku.values())}
+
+
+# reporte general de bodegas (mismo contenido que GET /reports/warehouses de la central)
+def build_warehouses_summary(session, job_id: str) -> dict:
+    inventory = [{"sku": r.sku, "warehouse_id": r.warehouse_id, "quantity": r.quantity,
+                  "reserved_quantity": r.reserved_quantity}
+                 for r in session.execute(select(GlobalInventory)).scalars()]
+    last = {s.warehouse_id: s.last_event_at for s in session.execute(select(WarehouseStatus)).scalars()}
+    sync = {s.warehouse_id: {"last_heartbeat_at": s.last_heartbeat_at, "outbox_pending": s.outbox_pending,
+                             "oldest_pending_at": s.oldest_pending_at, "last_snapshot_at": s.last_snapshot_at,
+                             "last_snapshot_id": s.last_snapshot_id}
+            for s in session.execute(select(WarehouseSync)).scalars()}
+    transfers = [{"source_warehouse": a, "destination_warehouse": b, "status": c, "quantity": d}
+                 for a, b, c, d in session.execute(select(Transfer.source_warehouse, Transfer.destination_warehouse,
+                                                          Transfer.status, Transfer.quantity)).all()]
+    pending = session.execute(select(CommandOutbox.id).where(CommandOutbox.published_at.is_(None))).all()
+    report = warehouses_summary(
+        configured=list(parse_warehouses()), inventory=inventory, last_event_at=last, sync=sync,
+        transfers=transfers, now=utcnow(), stale_after_seconds=env_int("STALE_AFTER_SECONDS", 60),
+        low_stock_threshold=env_int("LOW_STOCK_THRESHOLD", 5), pending_central_commands=len(pending))
+    return {"job_id": job_id, **report}
 
 
 def _iso(dt):
@@ -72,9 +97,13 @@ class ReportGenerator:
             if report_type not in SUPPORTED:
                 self._finish(job_id, "FAILED", error=f"report_type no soportado: {report_type}")
                 raise PermanentError(f"report_type no soportado: {report_type}")
-            snapshot = build_snapshot(session, job_id, report_type)
+            if report_type == "warehouses_summary":
+                snapshot = build_warehouses_summary(session, job_id)
+            else:
+                snapshot = build_snapshot(session, job_id, report_type)
         now = utcnow()
-        key = f"reports/{now:%Y}/{now:%m}/{job_id}.json"
+        folder = "reports/warehouses" if report_type == "warehouses_summary" else "reports"
+        key = f"{folder}/{now:%Y}/{now:%m}/{job_id}.json"
         try:
             self._upload(key, snapshot)
         except TransientError as exc:
@@ -88,7 +117,8 @@ class ReportGenerator:
                 self.publisher.publish(EVENTS_EXCHANGE, "report.completed", event)
             except Exception as exc:
                 log("report_completed_publish_failed", level="WARNING", job_id=job_id, error=repr(exc))
-        log("report_completed", job_id=job_id, s3_key=key, sku_count=snapshot["sku_count"])
+        log("report_completed", job_id=job_id, s3_key=key, report_type=report_type,
+            sku_count=snapshot.get("sku_count", snapshot.get("totals", {}).get("distinct_skus")))
         return key
 
     def _upload(self, key: str, snapshot: dict) -> None:
