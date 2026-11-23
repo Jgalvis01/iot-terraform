@@ -15,7 +15,6 @@ output "username" {
   value = aws_db_instance.this.username
 }
 
-output "databases" {
-  description = "Bases lógicas que crea el bootstrap de la instancia platform."
-  value       = ["wh_001", "wh_002", "wh_003", "central_read"]
+output "db_name" {
+  value = aws_db_instance.this.db_name
 }

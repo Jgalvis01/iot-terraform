@@ -34,3 +34,9 @@ variable "password" {
   type      = string
   sensitive = true
 }
+
+variable "db_name" {
+  description = "Base de datos inicial (read model de la central)."
+  type        = string
+  default     = "central_read"
+}

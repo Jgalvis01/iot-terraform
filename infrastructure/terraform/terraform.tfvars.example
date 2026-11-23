@@ -1,13 +1,28 @@
 region       = "us-east-1"
 project_name = "warehouse-platform"
 
+# Tu IP pública (consola RabbitMQ): curl -s https://checkip.amazonaws.com
 my_ip_cidr = "203.0.113.10/32"
 
-key_name  = "vockey" # par de claves del Learner Lab (labsuser.pem)
 image_tag = "latest" # mismo tag usado en scripts/build_push_ecr.sh
 
-wh002_instances         = 2
-platform_instance_type  = "t3.medium"
+# 4 VPCs: central + una por bodega (cada una con subnet pública y privada)
+central_cidr = "10.0.0.0/16"
+warehouses = {
+  "WH-001" = { cidr = "10.1.0.0/16", listener_port = 8001 }
+  "WH-002" = { cidr = "10.2.0.0/16", listener_port = 8002 }
+  "WH-003" = { cidr = "10.3.0.0/16", listener_port = 8003 }
+}
+
+# Capacidad (picos de 1000-2000 req/s): subir para la prueba de carga y bajar después
 warehouse_instance_type = "t3.small"
-db_instance_class       = "db.t3.micro"
-log_retention_days      = 7
+warehouse_api_workers   = 2
+outbox_relay_replicas   = 2
+central_api_count       = 2
+projection_workers      = 2
+broker_cpu              = 1024
+broker_memory           = 2048
+enable_autoscaling      = false
+
+db_instance_class  = "db.t3.micro"
+log_retention_days = 7

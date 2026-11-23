@@ -1,5 +1,5 @@
 locals {
-  alb = module.load_balancer.alb_dns_name
+  alb = module.central.alb_dns_name
 }
 
 output "alb_dns" {
@@ -7,13 +7,87 @@ output "alb_dns" {
 }
 
 output "urls" {
-  description = "Endpoints públicos a través del ALB."
-  value = {
-    central = "http://${local.alb}"
-    wh_001  = "http://${local.alb}:8001"
-    wh_002  = "http://${local.alb}:8002"
-    wh_003  = "http://${local.alb}:8003"
-  }
+  description = "Endpoints públicos. Las bodegas solo se alcanzan a través del ALB de la central."
+  value = merge(
+    { central = "http://${local.alb}", rabbitmq_ui = "http://${local.alb}:15672" },
+    { for id, w in var.warehouses : lower(id) => "http://${local.alb}:${w.listener_port}" },
+  )
+}
+
+output "vpcs" {
+  description = "4 VPCs: central + una por bodega, cada una con subnet pública y privada."
+  value = merge(
+    {
+      central = {
+        vpc_id          = module.vpc_central.vpc_id
+        cidr            = module.vpc_central.cidr
+        public_subnets  = module.vpc_central.public_subnet_ids
+        private_subnets = module.vpc_central.private_subnet_ids
+      }
+    },
+    { for id, v in module.vpc_warehouse : id => {
+      vpc_id          = v.vpc_id
+      cidr            = v.cidr
+      public_subnets  = v.public_subnet_ids
+      private_subnets = v.private_subnet_ids
+    } },
+  )
+}
+
+output "peering_connections" {
+  description = "Solo central <-> bodega (no existe peering entre bodegas)."
+  value       = { for id, p in module.peering : id => p.id }
+}
+
+output "warehouses" {
+  value = { for id, w in module.warehouse : id => {
+    instance_id       = w.instance_id
+    private_ip        = w.private_ip
+    security_group_id = w.security_group_id
+    network_acl_id    = w.network_acl_id
+    url_via_central   = "http://${local.alb}:${var.warehouses[id].listener_port}"
+  } }
+}
+
+output "instance_ids" {
+  description = "Para `aws ec2 start-instances --instance-ids ...` tras reiniciar la sesión del lab."
+  value       = [for w in module.warehouse : w.instance_id]
+}
+
+output "ssm_commands" {
+  description = "Shell en cada bodega (no tienen IP pública ni SSH abierto)."
+  value       = { for id, w in module.warehouse : id => "aws ssm start-session --target ${w.instance_id} --region ${var.region}" }
+}
+
+output "ecs_cluster" {
+  value = module.central.cluster_name
+}
+
+output "ecs_services" {
+  value = module.central.service_names
+}
+
+output "broker_dns" {
+  description = "NLB interno del broker (solo alcanzable desde la VPC central y las bodegas)."
+  value       = module.central.broker_dns_name
+}
+
+output "rabbitmq_password" {
+  value     = local.rabbitmq_password
+  sensitive = true
+}
+
+output "db_password" {
+  value     = local.db_password
+  sensitive = true
+}
+
+output "rds_endpoint" {
+  value = module.database.endpoint
+}
+
+output "target_group_arns" {
+  value = module.central.target_group_arns
 }
 
 output "ecr_repository_urls" {
@@ -28,60 +102,14 @@ output "s3_bucket" {
   value = module.storage.bucket_name
 }
 
-output "s3_prefixes" {
-  value = module.storage.prefixes
-}
-
 output "lambda_function" {
   value = module.lambda.function_name
 }
 
-output "rds_endpoint" {
-  value = module.database.endpoint
-}
-
-output "public_ips" {
-  description = "IPs públicas (CAMBIAN al parar/arrancar las EC2: `terraform refresh` o `terraform apply -refresh-only`)."
-  value = {
-    platform = module.compute.platform.public_ip
-    wh_a     = module.compute.wh_a.public_ip
-    wh_b     = [for i in module.compute.wh_b : i.public_ip]
-  }
-}
-
-output "platform_private_ip" {
-  value = module.compute.platform.private_ip
-}
-
-output "ssh_commands" {
-  value = merge(
-    {
-      platform = "ssh -i labsuser.pem ec2-user@${module.compute.platform.public_ip}"
-      wh_a     = "ssh -i labsuser.pem ec2-user@${module.compute.wh_a.public_ip}"
-    },
-    { for idx, i in module.compute.wh_b : "wh_b_${idx + 1}" => "ssh -i labsuser.pem ec2-user@${i.public_ip}" }
-  )
-}
-
-output "rabbitmq_ui" {
-  value = "http://${module.compute.platform.public_ip}:15672 (usuario warehouse; password: terraform output -raw rabbitmq_password)"
-}
-
-output "rabbitmq_password" {
-  value     = local.rabbitmq_password
-  sensitive = true
-}
-
-output "db_password" {
-  value     = local.db_password
-  sensitive = true
-}
-
-output "instance_ids" {
-  description = "Para `aws ec2 start-instances --instance-ids ...` tras reiniciar la sesión."
-  value       = module.compute.instance_ids
-}
-
 output "log_groups" {
-  value = concat(module.compute.log_groups, [module.lambda.log_group])
+  value = concat(module.central.log_groups, flatten([for w in module.warehouse : w.log_groups]), [module.lambda.log_group])
+}
+
+output "region" {
+  value = var.region
 }

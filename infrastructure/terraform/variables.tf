@@ -15,13 +15,40 @@ variable "project_name" {
   }
 }
 
-variable "vpc_cidr" {
-  type    = string
-  default = "10.20.0.0/16"
+variable "central_cidr" {
+  description = "CIDR de la VPC de la bodega central (ECS)."
+  type        = string
+  default     = "10.0.0.0/16"
+}
+
+variable "warehouses" {
+  description = <<-EOT
+    Bodegas: cada una es una EC2 en su PROPIA VPC (subnet pública + privada).
+    id => { cidr = CIDR /16 de su VPC, listener_port = puerto del ALB central que la expone }.
+  EOT
+  type = map(object({
+    cidr          = string
+    listener_port = number
+  }))
+  default = {
+    "WH-001" = { cidr = "10.1.0.0/16", listener_port = 8001 }
+    "WH-002" = { cidr = "10.2.0.0/16", listener_port = 8002 }
+    "WH-003" = { cidr = "10.3.0.0/16", listener_port = 8003 }
+  }
+
+  validation {
+    condition     = alltrue([for k, _ in var.warehouses : can(regex("^WH-[0-9]{3}$", k))])
+    error_message = "Los ids de bodega deben tener el formato WH-001."
+  }
+
+  validation {
+    condition     = length(distinct([for w in values(var.warehouses) : w.cidr])) == length(var.warehouses)
+    error_message = "Cada bodega debe tener una CIDR distinta."
+  }
 }
 
 variable "my_ip_cidr" {
-  description = "Tu IP pública en CIDR (p.ej. 203.0.113.10/32) para SSH y consola RabbitMQ. `curl -s https://checkip.amazonaws.com`."
+  description = "Tu IP pública en CIDR (p.ej. 203.0.113.10/32) para la consola RabbitMQ. `curl -s https://checkip.amazonaws.com`."
   type        = string
 
   validation {
@@ -30,10 +57,22 @@ variable "my_ip_cidr" {
   }
 }
 
+variable "public_ingress_cidrs" {
+  description = "Quién puede usar el ALB público de la central (API central y bodegas a través de la central)."
+  type        = list(string)
+  default     = ["0.0.0.0/0"]
+}
+
+variable "enable_nat" {
+  description = "Un NAT Gateway por VPC: las EC2 y tareas ECS están en subnets privadas y necesitan salida a Internet."
+  type        = bool
+  default     = true
+}
+
 variable "key_name" {
-  description = "Par de claves EC2. En Learner Lab existe `vockey` (descarga labsuser.pem desde AWS Details)."
+  description = "Par de claves EC2 (opcional; el acceso a las bodegas es por SSM Session Manager)."
   type        = string
-  default     = "vockey"
+  default     = null
 }
 
 variable "image_tag" {
@@ -48,7 +87,7 @@ variable "db_username" {
 }
 
 variable "db_password" {
-  description = "Password maestro de RDS. Si es null se genera uno aleatorio (ver output/terraform state)."
+  description = "Password maestro del RDS central. Si es null se genera uno aleatorio."
   type        = string
   sensitive   = true
   default     = null
@@ -71,25 +110,47 @@ variable "rabbitmq_password" {
   }
 }
 
-variable "wh002_instances" {
-  description = "Número de EC2 wh-b que sirven WH-002 detrás del ALB (escalamiento horizontal)."
-  type        = number
-  default     = 2
-
-  validation {
-    condition     = var.wh002_instances >= 1 && var.wh002_instances <= 4
-    error_message = "wh002_instances entre 1 y 4 (límite de instancias del Learner Lab)."
-  }
-}
-
-variable "platform_instance_type" {
-  type    = string
-  default = "t3.medium"
-}
-
 variable "warehouse_instance_type" {
   type    = string
   default = "t3.small"
+}
+
+variable "warehouse_api_workers" {
+  description = "Procesos uvicorn por bodega."
+  type        = number
+  default     = 2
+}
+
+variable "outbox_relay_replicas" {
+  description = "Réplicas del outbox relay por bodega."
+  type        = number
+  default     = 2
+}
+
+variable "central_api_count" {
+  type    = number
+  default = 2
+}
+
+variable "projection_workers" {
+  type    = number
+  default = 2
+}
+
+variable "broker_cpu" {
+  type    = number
+  default = 1024
+}
+
+variable "broker_memory" {
+  type    = number
+  default = 2048
+}
+
+variable "enable_autoscaling" {
+  description = "Autoescalado por CPU de central-api y projection-worker (requiere el rol vinculado de Application Auto Scaling)."
+  type        = bool
+  default     = false
 }
 
 variable "db_instance_class" {
