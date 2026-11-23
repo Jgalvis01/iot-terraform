@@ -13,6 +13,7 @@ from app.modules.health.health_controller import router as health_controller
 from app.modules.inventory.inventory_controller import router as inventory_controller
 from app.modules.products.products_controller import router as products_controller
 from app.modules.transfers.transfers_controller import router as transfers_controller
+from app.modules.sync.sync_controller import router as sync_controller
 from wcommon.correlation import CorrelationIdMiddleware
 from wcommon.logging import configure_logging, log
 
@@ -53,3 +54,4 @@ app.include_router(health_controller)
 app.include_router(products_controller)
 app.include_router(inventory_controller)
 app.include_router(transfers_controller)
+app.include_router(sync_controller)

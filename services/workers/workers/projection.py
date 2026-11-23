@@ -9,7 +9,7 @@ from wcommon.logging import log
 from wcommon.metrics import MESSAGES_DUPLICATED
 
 from workers.db import as_utc, parse_ts
-from workers.models import GlobalInventory, WarehouseStatus
+from workers.models import GlobalInventory, WarehouseStatus, WarehouseSync
 
 CONSUMER = "projection"
 HANDLED = {"INVENTORY_UPDATED", "PRODUCT_CREATED"}
@@ -26,6 +26,8 @@ class Projection:
         validate_event(msg)
         if msg["event_type"] == "WAREHOUSE_HEARTBEAT":
             return self._heartbeat(msg)
+        if msg["event_type"] == "INVENTORY_SNAPSHOT":
+            return self._snapshot(msg)
         if msg["event_type"] not in HANDLED:
             return "ignored"
         payload = msg["payload"]
@@ -86,16 +88,85 @@ class Projection:
 
     def _heartbeat(self, msg: dict) -> str:
         try:
-            warehouse_id = str(msg["payload"]["warehouse_id"]).upper()
+            payload = msg["payload"]
+            warehouse_id = str(payload["warehouse_id"]).upper()
             occurred_at = parse_ts(msg["occurred_at"])
+            pending = payload.get("outbox_pending")
+            oldest = parse_ts(payload.get("oldest_pending_at"))
         except (KeyError, ValueError) as exc:
             raise PermanentError(f"heartbeat inválido: {exc!r}") from exc
         try:
             with self.session_factory() as session, session.begin():
                 self._touch_warehouse(session, warehouse_id, occurred_at)
+                sync = self._sync_row(session, warehouse_id)
+                last = as_utc(sync.last_heartbeat_at)
+                if last is None or last <= occurred_at:
+                    sync.last_heartbeat_at = occurred_at
+                    if pending is not None:
+                        sync.outbox_pending = int(pending)
+                        sync.oldest_pending_at = oldest
         except (IntegrityError, OperationalError) as exc:
             raise TransientError(f"BD no disponible: {exc!r}") from exc
         return "heartbeat"
+
+    # resincronización completa enviada por la bodega al reconectar (o pedida por la central)
+    def _snapshot(self, msg: dict) -> str:
+        payload = msg["payload"]
+        try:
+            warehouse_id = str(payload["warehouse_id"]).upper()
+            occurred_at = parse_ts(msg["occurred_at"])
+            items = list(payload.get("items") or [])
+            parsed = [(str(i["sku"]), int(i["quantity"]), int(i.get("reserved_quantity", 0) or 0),
+                       parse_ts(i.get("updated_at")) or occurred_at) for i in items]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise PermanentError(f"INVENTORY_SNAPSHOT inválido: {exc!r}") from exc
+        applied = skipped = 0
+        try:
+            with self.session_factory() as session, session.begin():
+                if already_processed(session, msg["event_id"], CONSUMER):
+                    MESSAGES_DUPLICATED.labels(CONSUMER).inc()
+                    return "duplicate"
+                for sku, quantity, reserved, item_at in parsed:
+                    row = session.execute(select(GlobalInventory).where(
+                        GlobalInventory.sku == sku, GlobalInventory.warehouse_id == warehouse_id)
+                        .with_for_update()).scalar_one_or_none()
+                    if row is None:
+                        session.add(GlobalInventory(sku=sku, warehouse_id=warehouse_id, quantity=quantity,
+                                                    reserved_quantity=reserved, last_event_id=msg["event_id"],
+                                                    last_event_at=item_at))
+                        applied += 1
+                        continue
+                    last = as_utc(row.last_event_at)
+                    if last is not None and item_at < last:
+                        skipped += 1
+                        continue
+                    if (row.quantity, row.reserved_quantity) != (quantity, reserved):
+                        applied += 1
+                    row.quantity, row.reserved_quantity = quantity, reserved
+                    row.last_event_id, row.last_event_at = msg["event_id"], item_at
+                self._touch_warehouse(session, warehouse_id, occurred_at)
+                sync = self._sync_row(session, warehouse_id)
+                if payload.get("chunk", 1) == payload.get("chunks", 1):
+                    sync.last_snapshot_at = occurred_at
+                    sync.last_snapshot_id = payload.get("snapshot_id")
+                    sync.snapshot_items = int(payload.get("total_items", len(parsed)))
+                mark_processed(session, msg["event_id"], CONSUMER)
+        except IntegrityError as exc:
+            raise TransientError(f"conflicto concurrente: {exc.orig!r}") from exc
+        except OperationalError as exc:
+            raise TransientError(f"BD no disponible: {exc.orig!r}") from exc
+        log("projection_snapshot_applied", event_id=msg["event_id"], warehouse_id=warehouse_id,
+            snapshot_id=payload.get("snapshot_id"), reason=payload.get("reason"), items=len(parsed),
+            corrected=applied, skipped_newer=skipped)
+        return "snapshot"
+
+    @staticmethod
+    def _sync_row(session, warehouse_id) -> WarehouseSync:
+        sync = session.get(WarehouseSync, warehouse_id, with_for_update=True)
+        if sync is None:
+            sync = WarehouseSync(warehouse_id=warehouse_id, outbox_pending=0, snapshot_items=0)
+            session.add(sync)
+        return sync
 
     @staticmethod
     def _touch_warehouse(session, warehouse_id, occurred_at) -> None:

@@ -1,3 +1,4 @@
+import os
 import signal
 import time
 from datetime import datetime, timezone
@@ -10,6 +11,7 @@ import app.models
 from app.config import settings
 from app.database import Base, SessionLocal, engine
 from app.outbox import OutboxEntity
+from app.sync import enqueue_snapshot, outbox_stats
 from wcommon import rabbit
 from wcommon.events import build_event
 from wcommon.logging import configure_logging, log
@@ -18,6 +20,7 @@ BATCH_SIZE = 100
 POLL_SECONDS = 1.0
 MAX_BACKOFF = 30.0
 HEARTBEAT_SECONDS = 15.0
+RESYNC_ON_RECONNECT = os.getenv("RESYNC_ON_RECONNECT", "true").lower() == "true"
 _running = True
 
 
@@ -44,6 +47,21 @@ def relay_once(session: Session, publish_fn: Callable[[str, dict], None], batch_
     return published
 
 
+# tras (re)conectar: los pendientes ya están en cola y el snapshot va detrás de ellos
+def resync_after_reconnect(session: Session, reason: str) -> dict | None:
+    result = enqueue_snapshot(session, reason, skip_if_pending=True)
+    session.commit()
+    if result:
+        log("warehouse_resync_enqueued", warehouse_id=settings.WAREHOUSE_ID, **result)
+    return result
+
+
+def heartbeat_event(session: Session) -> dict:
+    wh = settings.WAREHOUSE_ID
+    return build_event("WAREHOUSE_HEARTBEAT", f"warehouse-{wh.split('-')[-1]}",
+                       {"warehouse_id": wh, **outbox_stats(session)})
+
+
 def _stop(*_):
     global _running
     _running = False
@@ -57,13 +75,23 @@ def run() -> None:
     connection = channel = None
     backoff = 1.0
     last_heartbeat = 0.0
+    resync_reason = "startup"
+    outage_started: float | None = None
     while _running:
         try:
             Base.metadata.create_all(bind=engine)
             if channel is None or channel.is_closed:
                 connection = rabbit.connect(max_wait_seconds=0)
                 channel = rabbit.open_publisher_channel(connection)
-                log("outbox_rabbit_connected")
+                downtime = round(time.monotonic() - outage_started, 1) if outage_started else 0.0
+                with SessionLocal() as session:
+                    pending = outbox_stats(session)["outbox_pending"]
+                log("outbox_rabbit_connected", pending_events=pending, downtime_seconds=downtime)
+                if resync_reason and RESYNC_ON_RECONNECT:
+                    with SessionLocal() as session:
+                        resync_after_reconnect(session, resync_reason)
+                resync_reason = None
+                outage_started = None
 
             def publish_fn(routing_key: str, message: dict) -> None:
                 rabbit.publish(channel, rabbit.EVENTS_EXCHANGE, routing_key, message)
@@ -72,13 +100,16 @@ def run() -> None:
                 n = relay_once(session, publish_fn)
             if time.monotonic() - last_heartbeat >= HEARTBEAT_SECONDS:
                 wh = settings.WAREHOUSE_ID
-                publish_fn(f"warehouse.heartbeat.{wh.lower()}", build_event(
-                    "WAREHOUSE_HEARTBEAT", f"warehouse-{wh.split('-')[-1]}", {"warehouse_id": wh}))
+                with SessionLocal() as session:
+                    publish_fn(f"warehouse.heartbeat.{wh.lower()}", heartbeat_event(session))
                 last_heartbeat = time.monotonic()
             backoff = 1.0
             if n < BATCH_SIZE:
                 time.sleep(POLL_SECONDS)
         except Exception as exc:
+            if outage_started is None:
+                outage_started = time.monotonic()
+            resync_reason = "reconnect"
             log("outbox_relay_error", level="WARNING", error=repr(exc), retry_in_seconds=backoff)
             try:
                 if connection is not None and connection.is_open:

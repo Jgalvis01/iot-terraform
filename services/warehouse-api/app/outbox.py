@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from sqlalchemy import BigInteger, Column, DateTime, Integer, String, JSON
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
@@ -22,9 +24,10 @@ class OutboxEntity(Base):
     attempts = Column(Integer, nullable=False, default=0)
 
 
-def enqueue_event(db: Session, event_type: str, routing_key: str, payload: dict) -> dict | None:
+def enqueue_event(db: Session, event_type: str, routing_key: str, payload: dict,
+                  occurred_at: datetime | None = None) -> dict | None:
     if not settings.EVENTS_ENABLED:
         return None
-    event = build_event(event_type, settings.event_source, payload)
+    event = build_event(event_type, settings.event_source, payload, occurred_at=occurred_at)
     db.add(OutboxEntity(event_id=event["event_id"], routing_key=routing_key, payload=event))
     return event

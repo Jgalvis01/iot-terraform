@@ -9,6 +9,7 @@ from app.errors import ApiError, InsufficientStock, INSUFFICIENT_STOCK, NOT_FOUN
 from app.modules.inventory.inventory_repository import InventoryRepository
 from app.modules.inventory.rules import MovementType, apply_movement
 from app.modules.inventory.schemas import InventoryResponse, MovementCreate
+from app.modules.shared.utils import schemas_utils
 from app.outbox import enqueue_event
 from wcommon.logging import log
 
@@ -30,13 +31,16 @@ class InventoryService:
 
     def apply_in_tx(self, inventory, product, m_type: MovementType, qty: int, reference: Optional[str]):
         new_qty, new_reserved = apply_movement(inventory.quantity, inventory.reserved_quantity, m_type, qty)
+        # mismo instante para la fila y para el evento: la central compara versiones con él (LWW)
+        changed_at = schemas_utils.current_utc_time()
+        inventory.updated_at = changed_at
         self.repo.update_stock(inventory, new_qty, new_reserved)
         movement = self.repo.register_movement(inventory.product_id, product.sku, m_type.value, qty, reference)
         enqueue_event(self.db, "INVENTORY_UPDATED", f"inventory.updated.{settings.wh_lower}", {
             "warehouse_id": settings.WAREHOUSE_ID, "sku": product.sku, "product_id": inventory.product_id,
             "quantity": new_qty, "reserved_quantity": new_reserved,
             "movement_type": m_type.value, "movement_quantity": qty, "reference": reference,
-        })
+        }, occurred_at=changed_at)
         snapshot = {"product_id": inventory.product_id, "sku": product.sku, "movement_type": m_type.value,
                     "quantity": qty, "new_quantity": new_qty, "new_reserved": new_reserved,
                     "reference": reference}
