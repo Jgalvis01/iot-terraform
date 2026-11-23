@@ -14,7 +14,7 @@ Sería un punto único de fallo y de contención: la carga de la bodega más act
 Las demás siguen operando. La central sigue respondiendo con el read model y marca `stale` a esa bodega tras `STALE_AFTER_SECONDS` (60 s) sin eventos; en `mode=fanout` aparece en `unavailable_warehouses`. Las transferencias que la involucren reintentan (3 x 5 s) y se compensan o fallan según el paso. Demo: `tests/failure/05_warehouse_down.sh`.
 
 **4. ¿Cómo escalaría una sola bodega?**
-Horizontalmente la API (stateless) detrás de un balanceador: WH-002 con `wh-002-api-1/2/3` y Nginx localmente, o `wh002_instances` EC2 en el target group `:8002` del ALB. Las lecturas se absorben con Redis (Cache Aside); para escrituras se escala la BD (mayor instancia, réplicas de lectura). Se prueba con `tests/load/run_matrix.sh` (1 vs 3 réplicas). ADR-010.
+Horizontalmente la API (stateless) detrás de un balanceador: WH-002 con `wh-002-api-1/2/3` y Nginx localmente, o, en AWS, más procesos (`warehouse_api_workers`) o más EC2 en el target group `:8002` del ALB central. Las lecturas se absorben con Redis (Cache Aside); para escrituras se escala la BD (mayor instancia, réplicas de lectura). Se prueba con `tests/load/run_matrix.sh` (1 vs 3 réplicas). ADR-010.
 
 **5. ¿Cómo evitaría que una bodega afecte a las demás?**
 Base, Redis, API y cache-worker/outbox propios por bodega, balanceo independiente y tráfico entre bodegas solo mediante eventos asíncronos o comandos de saga con timeout (3 s) y reintentos acotados. Una cola por bodega para la caché (`q.cache.wh-00X`). Límite real: en AWS Learner Lab el RDS y la EC2 `platform` se comparten por presupuesto (ADR-012).
@@ -87,7 +87,7 @@ Lectura rápida y local (un `SELECT` por PK `(sku, warehouse_id)`), independient
 ## Cloud
 
 **25. ¿Por qué utilizar EC2?**
-Es lo permitido y más simple en Learner Lab para ejecutar contenedores Docker Compose (no se pueden crear roles IAM, así que usamos `LabInstanceProfile`). Dan control total para RabbitMQ y Redis y permiten escalar `wh-b` con `wh002_instances`. En producción usaríamos ECS/EKS (ADR-012).
+Así lo pide el enunciado: cada bodega es una EC2 con Docker en su propia VPC (aislamiento físico de red y de base de datos) y la central es un ECS Fargate, que escala por servicio sin administrar servidores. Learner Lab no deja crear roles, así que las EC2 usan `LabInstanceProfile` y ECS usa `LabRole` como rol de ejecución y de tarea (ADR-015).
 
 **26. ¿Qué problema resuelve ECR?**
 Registro privado de imágenes: construimos una vez (`scripts/build_push_ecr.sh`, 6 repositorios) y cada EC2 hace `docker pull` al arrancar con su instance profile, sin construir en las máquinas ni usar un registro público. Por eso el despliegue es en dos etapas (`-target=module.ecr`, publicar, resto).

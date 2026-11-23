@@ -48,7 +48,7 @@ Propiedades AMQP: `delivery_mode=2` (persistente), `content_type=application/jso
 | `q.cache.wh-002` | warehouse.events | `inventory.updated.wh-002` | `cache-worker` WH-002 | 10 | `DEL` natural |
 | `q.cache.wh-003` | warehouse.events | `inventory.updated.wh-003` | `cache-worker` WH-003 | 10 | `DEL` natural |
 | `q.audit` | warehouse.events | `#` | `audit-worker` (`workers.audit`) | 50 | `audit_log.event_id` PK, `ON CONFLICT DO NOTHING` |
-| `q.projection` | warehouse.events | `inventory.updated.*`, `product.created.*`, `warehouse.heartbeat.*` | `projection-worker` | 10 | `processed_events` (`projection`) + `occurred_at` |
+| `q.projection` | warehouse.events | `inventory.updated.*`, `product.created.*`, `warehouse.heartbeat.*`, `inventory.snapshot.*` | `projection-worker` | 10 | `processed_events` (`projection`) + `occurred_at` |
 | `q.transfers` | platform.commands | `transfer.process` | `transfer-orchestrator` | 1 | máquina de estados reanudable |
 | `q.reports` | platform.commands | `report.generate` | `report-worker` | 1 | job `COMPLETED` no se repite |
 | `q.iot.storage` | warehouse.events | `iot.reading.*` | `iot-storage-worker` | 50 | `processed_events` (`iot_storage`) + `sequence_number` |
@@ -197,8 +197,8 @@ Efecto en proyección: si no existe la fila `(sku, warehouse_id)` en `global_inv
 
 - **Routing key:** `warehouse.heartbeat.<wh>` (p. ej. `warehouse.heartbeat.wh-001`).
 - **Productor:** el outbox relay de cada bodega, cada 15 s, y solo si su base de datos respondió en ese ciclo. No pasa por la tabla outbox, porque es una señal efímera: perder uno no importa.
-- **Consumidor:** `projection-worker` (`q.projection`). Actualiza `warehouse_status.last_event_at` sin registrar `processed_events`; es idempotente porque solo avanza la marca de tiempo. `audit-worker` lo ignora.
-- **Para qué sirve:** que `stale` signifique "sin señales de la bodega" y no "sin movimientos de inventario".
+- **Consumidor:** `projection-worker` (`q.projection`). Actualiza `warehouse_status.last_event_at` y `warehouse_sync` (backlog del outbox) sin registrar `processed_events`; es idempotente porque solo avanza la marca de tiempo (un heartbeat viejo no pisa uno nuevo). `audit-worker` lo ignora.
+- **Para qué sirve:** que `stale` signifique "sin señales de la bodega" y no "sin movimientos de inventario", y que la central sepa cuántos eventos tiene cada bodega pendientes de enviar (`GET /reports/warehouses`).
 
 ```json
 {
@@ -208,7 +208,32 @@ Efecto en proyección: si no existe la fila `(sku, warehouse_id)` en `global_inv
   "occurred_at": "2026-11-18T17:08:39Z",
   "correlation_id": "COR-…",
   "source": "warehouse-001",
-  "payload": { "warehouse_id": "WH-001" }
+  "payload": {
+    "warehouse_id": "WH-001",
+    "outbox_pending": 0,
+    "oldest_pending_at": null,
+    "last_published_at": "2026-11-18T17:08:38.912Z"
+  }
+}
+```
+
+### 5.8 `INVENTORY_SNAPSHOT`
+
+- **Routing key:** `inventory.snapshot.<wh>`.
+- **Productor:** la bodega, por el outbox (va **detrás** de los eventos pendientes). Lo encola el outbox relay al arrancar y cada vez que reconecta tras una caída del broker o de la red (`RESYNC_ON_RECONNECT=true`, sin duplicar si ya hay uno pendiente), o bajo demanda con `POST /sync/snapshot` (la central lo pide con `POST /warehouses/{id}/resync`).
+- **Contenido:** el inventario completo de la bodega en trozos de 500 SKU (`chunk`/`chunks`). `updated_at` de cada ítem es el mismo instante que el `occurred_at` del último `INVENTORY_UPDATED` de ese SKU, así que la central compara versiones exactas.
+- **Consumidor:** `projection-worker`. Por cada ítem aplica last-write-wins: corrige el read model si el ítem es igual o más nuevo que lo que tiene y lo ignora si la central ya recibió un evento posterior. Registra `warehouse_sync.last_snapshot_at`. Idempotente por `processed_events`.
+- **Para qué sirve:** resincronizar la central con la bodega aunque se haya perdido algún evento (p. ej. uno que terminó en DLQ).
+
+```json
+{
+  "event_type": "INVENTORY_SNAPSHOT",
+  "source": "warehouse-002",
+  "payload": {
+    "warehouse_id": "WH-002", "snapshot_id": "SNAP-66507d4cf38e", "reason": "reconnect",
+    "chunk": 1, "chunks": 1, "total_items": 2,
+    "items": [{ "sku": "P-001", "quantity": 27, "reserved_quantity": 0, "updated_at": "2026-11-23T00:29:35.974269Z" }]
+  }
 }
 ```
 

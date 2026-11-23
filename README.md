@@ -40,11 +40,11 @@ services/
   frontend/              UI web de la bodega WH-001
 infrastructure/
   compose/               docker-compose.yml por profiles, Nginx LB, Prometheus, Grafana
-  terraform/             IaC para AWS (network, ecr, database, compute, storage, lambda, load_balancer)
-  aws/                   plantillas de user_data y docker-compose para las EC2
+  terraform/             IaC para AWS (vpc, peering, warehouse, central, database, ecr, storage, lambda) + tests/
+  aws/                   plantillas de user_data y docker-compose para las EC2 de bodega
 db/                      schema.sql, seed.sql, central_schema.sql
 tests/                   unit/, integration/, load/ (k6), failure/ (escenarios de fallo), http/ (colecciones .http)
-scripts/                 seed_local.sh, run_tests.sh, build_push_ecr.sh, lab_credentials.sh
+scripts/                 seed_local.sh, run_tests.sh, build_push_ecr.sh, lab_credentials.sh, aws_deploy.sh, aws_verify.sh
 docs/                    ADRs, arquitectura, contratos, eventos, matriz de errores, comparaciones, despliegue AWS
 ```
 
@@ -61,7 +61,7 @@ Todos los servicios están en `infrastructure/compose/docker-compose.yml` y se a
 | *(ninguno)* | 3 bodegas: `wh-00X-db`, `wh-00X-redis`, `wh-001-api`, `wh-002-api-1`, `wh-002-lb`, `wh-003-api` |
 | `lb` | réplicas `wh-002-api-2` y `wh-002-api-3` |
 | `events` | RabbitMQ, outbox relays y cache-workers |
-| `central` | `central-db`, `central-api`, `transfer-orchestrator`, `projection-worker`, `audit-worker`, `report-worker`, S3 local (S3Mock) |
+| `central` | `central-db`, `central-api`, `command-relay`, `transfer-orchestrator`, `projection-worker`, `audit-worker`, `report-worker`, S3 local (S3Mock) |
 | `batch` | proceso batch (se ejecuta con `run`) |
 | `obs` | Prometheus, Grafana y exporters |
 | `iot` | Mosquitto, simulador, ingesta y workers IoT |
@@ -104,14 +104,31 @@ Las colecciones de peticiones de ejemplo están en `tests/http/warehouse.http` y
 ./scripts/run_tests.sh --all    # + integración contra PostgreSQL y RabbitMQ reales en Docker (15)
 ```
 
-- **Fallos:** `tests/failure/01_redis_down.sh` … `07_dlq.sh` (Redis caído, RabbitMQ caído, worker detenido, mensaje duplicado, bodega caída, fallos de saga, DLQ).
+- **Fallos:** `tests/failure/01_redis_down.sh` … `08_broker_down_sync.sh` (Redis caído, RabbitMQ caído, worker detenido, mensaje duplicado, bodega caída, fallos de saga, DLQ, broker caído con colas de respaldo y resincronización). Si algún puerto ya está ocupado, `COMPOSE_OVERRIDE=/ruta/override.yml` añade un fichero de compose extra.
+- **Infraestructura:** `cd infrastructure/terraform && terraform test` (topología con proveedor AWS simulado).
 - **Carga (k6 en Docker):** `tests/load/run_k6.sh <script> -e BASE_URL=... -e VUS=... -e DURATION=...`, matriz completa con `tests/load/run_matrix.sh` y tabla de resultados con `python3 tests/load/summarize.py tests/load/results`.
 
 ## Despliegue en AWS
 
-La infraestructura en AWS Academy Learner Lab está definida en `infrastructure/terraform/`: VPC, RDS PostgreSQL,
-ALB, EC2 (platform, wh-a, wh-b × N), ECR, S3, Lambda y CloudWatch Logs. El procedimiento, los costos y la operación
-están en `docs/aws-deployment.md`. Las decisiones condicionadas por Learner Lab se explican en `docs/adr/ADR-012-despliegue-aws-learner-lab.md`.
+Topología (ADR-015): **4 VPCs**, cada una con subnet pública y privada. Cada bodega `WH-00X` es una **EC2 con Docker**
+en la subnet privada de su VPC, con su propio security group; la **bodega central es un clúster ECS Fargate** en su VPC
+(central-api, command-relay, orquestador, proyección, auditoría, reportes y el broker RabbitMQ con datos en EFS).
+Peering **hub-and-spoke**: la central llega a todas las bodegas; las bodegas no se ven entre sí (sin peering entre
+ellas, SG y NACL). Los clientes entran por el ALB de la central (`:80` central, `:8001-8003` bodegas).
+
+Si se cae el broker nada se detiene (ADR-016): las bodegas acumulan eventos en su `outbox`, la central guarda los
+comandos en `command_outbox`, y al volver se envía todo y cada bodega manda un snapshot para resincronizar.
+
+```bash
+scripts/lab_credentials.sh       # credenciales del Learner Lab
+scripts/aws_deploy.sh            # ECR -> imágenes -> VPCs, peering, EC2, ECS, RDS, S3, Lambda
+scripts/aws_verify.sh            # verificación con AWS CLI (red, aislamiento, Docker, ECS, funcional)
+scripts/aws_verify.sh --chaos    # + caída/reinicio del broker
+```
+
+Endpoints añadidos: `GET /warehouses`, `GET /warehouses/connectivity`, `POST /warehouses/{id}/resync`,
+`GET /reports/warehouses` (central) y `GET /sync/status`, `POST /sync/snapshot` (bodega).
+Procedimiento, costes y operación en `docs/aws-deployment.md`.
 
 ## Entregables
 
@@ -135,4 +152,5 @@ están en `docs/aws-deployment.md`. Las decisiones condicionadas por Learner Lab
 - `TRANSFER_STATUS_CHANGED`, `REPORT_COMPLETED` y `SENSOR_ALERT` se publican directamente, sin outbox: son notificaciones y la verdad está en la base de datos.
 - Si `release` o `commit-out` agotan sus reintentos, la transferencia queda en DLQ para intervención manual.
 - No hay purga periódica de `outbox` ni de `processed_events`.
-- En AWS, la instancia `platform` (RabbitMQ y Redis) es un punto único de fallo. En producción se usarían Amazon MQ y ElastiCache multi-AZ (ADR-012).
+- En AWS el broker es una sola tarea ECS: su caída no detiene el servicio (colas de respaldo) y sus colas sobreviven al reinicio (EFS), pero no hay clúster. En producción se usaría Amazon MQ multi-AZ (ADR-015).
+- No hay purga periódica de `command_outbox`.

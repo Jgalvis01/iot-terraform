@@ -1,229 +1,169 @@
 # Despliegue en AWS Academy Learner Lab
 
-Guía paso a paso para desplegar la Warehouse Cloud Platform con Terraform en
-**AWS Academy Learner Lab** (región `us-east-1`).
+Guía para desplegar la Warehouse Cloud Platform con Terraform en **AWS Academy Learner Lab**
+(`us-east-1`) y verificarla con AWS CLI. Decisiones: [ADR-015](adr/ADR-015-vpc-por-bodega-y-central-ecs.md)
+(topología) y [ADR-016](adr/ADR-016-colas-de-respaldo-y-resincronizacion.md) (colas de respaldo y resincronización).
 
-Código: `infrastructure/terraform/` (módulos `network, ecr, database, compute,
-storage, lambda, load_balancer`) y `infrastructure/aws/` (user_data y plantillas
-de docker-compose que se renderizan para cada EC2).
+Código: `infrastructure/terraform/` (módulos `vpc`, `peering`, `warehouse`, `central`, `database`, `ecr`,
+`storage`, `lambda`) y `infrastructure/aws/` (user_data y docker-compose de cada EC2 de bodega).
 
 ## 1. Arquitectura desplegada
 
 ```text
-                          Internet
-                             |
-          ALB público (warehouse-platform-alb)
-   :80 -> central   :8001 -> WH-001   :8002 -> WH-002   :8003 -> WH-003
-      |                  |                  |                  |
- +----v-----------+  +---v---------------------v--+   +-------v-------+
- | EC2 platform   |  | EC2 wh-a (t3.small)        |   | EC2 wh-b x N  |
- | (t3.medium)    |  |  wh-001-api :8001          |   | (t3.small)    |
- | rabbitmq       |  |  wh-003-api :8003          |   | wh-002-api    |
- | redis-wh-001..3|  +----------------------------+   |   :8002       |
- | central-api    |              subnets públicas      +---------------+
- | orchestrator, projection, audit, report, cache-workers x3, outbox x3 |
- +-------+--------+
-         |                 subnets privadas
-   RDS PostgreSQL 15 (db.t3.micro): wh_001, wh_002, wh_003, central_read
-
- S3 warehouse-platform-<sufijo>  -- exports/ --> Lambda s3_processor --> processed/ | rejected/
- ECR: warehouse-api, central-api, workers, batch, iot, frontend
- CloudWatch Logs: /warehouse-platform/<servicio>, /aws/lambda/s3_processor
+                              Internet
+                                 │
+            ALB público  (VPC central, subnets públicas 10.0.0.0/24, 10.0.1.0/24)
+     :80 central-api   :8001 WH-001   :8002 WH-002   :8003 WH-003   :15672 consola RabbitMQ (my_ip)
+                                 │
+ VPC central 10.0.0.0/16 ─ subnets privadas 10.0.10.0/24, 10.0.11.0/24 ─ NAT
+ ┌──────────────────────── ECS Fargate (clúster warehouse-platform-central) ───────────────────────┐
+ │ central-api ×2 · command-relay · transfer-orchestrator · projection-worker ×2 · audit · report  │
+ │ rabbitmq (datos en EFS) ◀── NLB interno :5672                                                    │
+ └──────────────────────────────────────────────────────────────────────────────────────────────────┘
+   RDS PostgreSQL 15 (central_read)       S3 (reportes, exports) ─▶ Lambda s3_processor
+          │ peering                 │ peering                 │ peering      ✗ sin peering entre bodegas
+ VPC WH-001 10.1.0.0/16      VPC WH-002 10.2.0.0/16      VPC WH-003 10.3.0.0/16
+  pública 10.1.0.0/24 (NAT)   pública 10.2.0.0/24 (NAT)   pública 10.3.0.0/24 (NAT)
+  privada 10.1.10.0/24        privada 10.2.10.0/24        privada 10.3.10.0/24
+   EC2 10.1.10.10 + Docker     EC2 10.2.10.10 + Docker     EC2 10.3.10.10 + Docker
+   SG wh-001 + NACL            SG wh-002 + NACL            SG wh-003 + NACL
+   api · postgres · redis · outbox relay ×2 · cache-worker   (en cada bodega)
 ```
 
-Decisiones condicionadas por el Learner Lab:
-
-| Restricción | Decisión |
+| Requisito | Cómo se cumple |
 |---|---|
-| No se pueden crear roles/políticas IAM | `data "aws_iam_role" "lab"` (LabRole) para la Lambda y `LabInstanceProfile` para las EC2 |
-| Presupuesto ~100 USD | Sin NAT Gateway: EC2 en subnets públicas con SG restrictivos; RDS en subnets privadas. Un solo RDS `db.t3.micro` single-AZ con 4 bases lógicas. RabbitMQ y Redis en contenedores (no Amazon MQ/ElastiCache) |
-| Credenciales temporales (~4 h) | Estado Terraform local; script `scripts/lab_credentials.sh` para renovarlas |
-| Las EC2 se detienen al terminar la sesión | Docker habilitado en systemd + `restart: unless-stopped`; central llega a las bodegas por el **DNS del ALB** (estable), no por IPs |
-| Par de claves | `vockey` (descarga `labsuser.pem` desde *AWS Details*) |
+| 3 EC2, una por bodega `WH-00X` | `module.warehouse["WH-00X"]`: EC2 AL2023 en la subnet privada de su VPC |
+| Cada EC2 con su propia VPC pública y privada | `module.vpc_warehouse["WH-00X"]`: 1 subnet pública (NAT) + 1 privada |
+| Central = ECS con su propia VPC pública y privada | `module.vpc_central` (2 AZ) + `module.central` (ECS Fargate) |
+| Un security group por bodega | `warehouse-platform-wh-00X-sg`: entrada solo desde la CIDR central |
+| Docker en cada EC2 | `user_data` instala Docker + compose y levanta los contenedores |
+| La central accede a todas las bodegas | peering + rutas central→bodega; `GET /warehouses/connectivity` lo prueba en vivo |
+| Las bodegas no se ven entre sí | sin peering entre ellas (el peering no es transitivo) + SG + NACL que deniega las otras CIDR |
+| Broker para 1000-2000 req/s | RabbitMQ en ECS (1 vCPU/2 GB), relays y proyecciones con consumidores competidores |
+| Si cae el broker, los mensajes siguen al volver | colas durables + mensajes persistentes + datos en EFS |
+| Cola en caso de fallo del broker | `outbox` en cada bodega + `command_outbox` en la central (ADR-016) |
+| Sincronizar la bodega al reanudar la conexión | el relay envía pendientes y luego un `INVENTORY_SNAPSHOT` |
+| Reporte general de bodegas | `GET /reports/warehouses` y `POST /reports {"report_type":"warehouses_summary"}` → S3 |
 
-Escalamiento horizontal: `wh002_instances` (default 2) EC2 `wh-b` registradas en
-el target group de `:8002`. Para probar más réplicas: `terraform apply -var wh002_instances=3`.
+Restricciones del Learner Lab (igual que ADR-012): no se pueden crear roles IAM (se usan `LabRole` y
+`LabInstanceProfile`), credenciales de ~4 h, presupuesto de ~100 USD y estado de Terraform local.
 
 ## 2. Requisitos locales
 
-- Terraform >= 1.6 (probado con 1.9.8), AWS CLI v2, Docker (con buildx si usas Mac ARM).
-- Tu IP pública: `curl -s https://checkip.amazonaws.com` → `x.x.x.x/32`.
+- Terraform >= 1.7 (probado con 1.17), AWS CLI v2, Docker (para construir las imágenes), `curl` y Python 3.
+- En **Windows** ejecuta los scripts `.sh` con **Git Bash** (desde PowerShell:
+  `& "C:\Program Files\Git\bin\bash.exe" scripts/aws_verify.sh`).
+- Opcional: [Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)
+  para abrir una consola en las EC2 (`aws ssm start-session`). Las pruebas automáticas no lo necesitan.
 
-## 3. Iniciar el lab y cargar credenciales
+## 3. Credenciales del lab
 
-1. En AWS Academy → *Learner Lab* → **Start Lab**; espera el círculo verde.
+1. AWS Academy → *Learner Lab* → **Start Lab** (círculo verde).
 2. **AWS Details** → *AWS CLI: Show* → copia el bloque `[default] ...`.
-3. Descarga **Download PEM** → `labsuser.pem` (`chmod 400 labsuser.pem`).
-4. Carga las credenciales:
+3. `scripts/lab_credentials.sh` → pega el bloque → Enter en una línea vacía. Muestra `aws sts get-caller-identity`.
+
+> Las credenciales caducan al terminar la sesión (`ExpiredToken`). Repite el paso 3 en cada sesión.
+
+## 4. Desplegar
+
+Todo en un paso (crea `terraform.tfvars` con tu IP si no existe, ECR, imágenes y el resto):
 
 ```bash
-scripts/lab_credentials.sh          # pega el bloque y pulsa Enter en una línea vacía (o Ctrl-D)
-# muestra el resultado de: aws sts get-caller-identity
+scripts/aws_deploy.sh          # pide confirmación en cada apply
+scripts/aws_deploy.sh -y       # sin confirmaciones
 ```
 
-> Las credenciales caducan cuando termina la sesión. Repite el paso 4 en cada sesión.
-
-## 4. Configurar variables
+O a mano, en dos etapas (las EC2 y ECS descargan imágenes de ECR al arrancar):
 
 ```bash
 cd infrastructure/terraform
-cp terraform.tfvars.example terraform.tfvars
-# edita my_ip_cidr (obligatorio). db_password/rabbitmq_password: si no se ponen se generan.
-```
-
-## 5. Despliegue en dos etapas
-
-Las EC2 descargan imágenes de ECR al arrancar, así que primero se crean los
-repositorios y se publican las imágenes.
-
-```bash
-cd infrastructure/terraform
+cp terraform.tfvars.example terraform.tfvars      # edita my_ip_cidr
 terraform init
-
-# Etapa 1: solo ECR
-terraform apply -target=module.ecr
-
-# Publicar imágenes (desde la raíz del repo). El tag debe coincidir con image_tag.
-cd ../..
-scripts/build_push_ecr.sh latest
-# (o solo algunas: scripts/build_push_ecr.sh latest warehouse-api workers)
-
-# Etapa 2: todo lo demás (VPC, RDS ~5-10 min, EC2, ALB, S3, Lambda)
-cd infrastructure/terraform
-terraform plan -out tfplan
-terraform apply tfplan
+terraform test                                    # pruebas de topología sin tocar AWS (proveedor simulado)
+terraform apply -target=module.ecr                # etapa 1
+cd ../.. && scripts/build_push_ecr.sh latest warehouse-api central-api workers
+cd infrastructure/terraform && terraform apply    # etapa 2 (~10-15 min: NAT, RDS, ECS)
 terraform output
 ```
 
-El bootstrap de cada EC2 (user_data) tarda ~3-5 min: instala Docker y el plugin
-compose, hace login en ECR con el instance profile, (en `platform`) crea las
-bases `wh_001, wh_002, wh_003, central_read` en RDS de forma idempotente,
-escribe `/opt/warehouse/docker-compose.yml` y ejecuta `docker compose up -d`.
-Si las imágenes no estaban en ECR, reintenta ~10 min; después basta con
-`sudo /opt/warehouse/redeploy.sh` en la instancia.
+El bootstrap de cada bodega tarda ~3-5 min después de crearse la EC2 (`/var/log/warehouse-bootstrap.log`).
 
-## 6. Verificación
+## 5. Verificar con AWS CLI
 
 ```bash
-ALB=$(terraform output -raw alb_dns)
-curl -s http://$ALB/health            # central-api
-curl -s http://$ALB:8001/health       # WH-001
-curl -s http://$ALB:8002/health       # WH-002 (repetir: alterna entre instancias wh-b)
-curl -s http://$ALB:8003/health       # WH-003
-
-curl -s -X POST http://$ALB:8001/products -H 'Content-Type: application/json' \
-  -d '{"sku":"P-001","name":"Producto 1","unit":"unit","category":"general"}'
-curl -s -X POST http://$ALB:8001/inventory/movements -H 'Content-Type: application/json' \
-  -d '{"sku":"P-001","type":"RECEIPT","quantity":10,"reference":"aws-demo"}'
-curl -s "http://$ALB/global/inventory/P-001?mode=readmodel"
-
-# Lambda: subir un export y ver el resultado procesado
-BUCKET=$(terraform output -raw s3_bucket)
-printf 'sku,warehouse_id,quantity\nP-001,WH-001,10\n' > /tmp/demo.csv
-aws s3 cp /tmp/demo.csv s3://$BUCKET/exports/demo.csv
-aws s3 ls s3://$BUCKET/processed/
+scripts/aws_verify.sh            # red, aislamiento, Docker, ECS, ALB y pruebas funcionales
+scripts/aws_verify.sh --chaos    # + caída y reinicio del broker (≈10 min, modifica servicios ECS y los restaura)
 ```
 
-Estado de los targets: consola EC2 → *Target Groups* (deben estar `healthy`;
-el health check es `GET /health`, 2 OK / 2 fallos, cada 15 s).
+Qué comprueba (cada línea sale como ✔/✘ y el script termina con código ≠ 0 si algo falla):
 
-## 7. Logs y acceso
+| # | Comprobación | Comando AWS |
+|---|---|---|
+| 1 | 4 VPCs, cada una con subnet pública y privada; NAT disponible en cada una | `ec2 describe-vpcs`, `describe-subnets`, `describe-nat-gateways` |
+| 2 | 3 peerings `active` central↔bodega y **ninguno** entre bodegas; las bodegas solo enrutan hacia la CIDR central | `ec2 describe-vpc-peering-connections`, `describe-route-tables` |
+| 3 | SG de cada bodega con entrada solo desde la central; NACL que deniega las otras bodegas | `ec2 describe-security-group-rules`, `describe-network-acls` |
+| 4 | EC2 `running`, sin IP pública, en subnet privada; Docker instalado y contenedores `running` | `ec2 describe-instances`, `ssm send-command` |
+| 5 | Desde cada bodega: su API responde, llega al broker y **no** llega a las otras bodegas | `ssm send-command` (`curl`, `nc -z`) |
+| 6 | Servicios ECS con todas sus tareas; target groups `healthy` | `ecs describe-services`, `elbv2 describe-target-health` |
+| 7 | `/health` de la central y de cada bodega vía ALB; central→bodegas por red privada; producto → central (CQRS); reporte de bodegas; reporte en S3 | `curl`, `s3api head-object` |
+| 8 | `--chaos`: broker a 0 tareas → bodega sigue aceptando movimientos (outbox crece), transferencia `queued`; broker a 1 → outbox y `command_outbox` vacíos, saga `COMPLETED`, central sincronizada, snapshot registrado | `ecs update-service`, `ecs wait services-stable` |
+| 9 | `--chaos`: mensajes que estaban en cola sobreviven al reinicio del broker (EFS) | `ecs update-service --force-new-deployment` |
 
-- **CloudWatch Logs**: un grupo por servicio `/warehouse-platform/<servicio>`
-  (p.ej. `/warehouse-platform/wh-002-api`, stream = instancia `wh-b-1`, `wh-b-2`)
-  y `/aws/lambda/s3_processor`. Retención 7 días.
-
-  ```bash
-  aws logs tail /warehouse-platform/central-api --follow
-  aws logs tail /warehouse-platform/wh-002-api --since 10m
-  ```
-
-- **SSH** (solo desde `my_ip_cidr`): `terraform output ssh_commands`
-
-  ```bash
-  ssh -i labsuser.pem ec2-user@<ip>
-  sudo docker compose -f /opt/warehouse/docker-compose.yml ps
-  sudo tail -f /var/log/warehouse-bootstrap.log
-  ```
-
-- **RabbitMQ UI**: `terraform output rabbitmq_ui` (usuario `warehouse`,
-  password `terraform output -raw rabbitmq_password`). Solo desde tu IP.
-- **Redesplegar** tras publicar nuevas imágenes con el mismo tag: SSH a la
-  instancia y `sudo /opt/warehouse/redeploy.sh`. Con un tag nuevo:
-  `terraform apply -var image_tag=v2` (recrea las EC2, porque cambia el user_data).
-
-## 8. Al terminar / reiniciar la sesión
-
-Cuando la sesión del lab termina (o pulsas *End Lab*):
-
-- Las **EC2 se detienen** automáticamente. Al pulsar *Start Lab* de nuevo, el
-  Learner Lab normalmente vuelve a arrancar las instancias que estaban corriendo
-  (puede tardar unos minutos); compruébalo y, si siguen en `stopped`, arráncalas:
-
-  ```bash
-  aws ec2 start-instances --instance-ids $(terraform output -json instance_ids | jq -r '.[]')
-  ```
-
-- Al arrancar, Docker inicia solo y los contenedores (`restart: unless-stopped`)
-  se levantan con las imágenes ya descargadas: no hace falta re-ejecutar user_data
-  ni volver a hacer login en ECR.
-- La **IP pública de cada EC2 cambia** (no se usan Elastic IPs para ahorrar).
-  Actualiza los outputs: `terraform apply -refresh-only`. Las **IPs privadas no
-  cambian**, por lo que las conexiones internas (Redis/RabbitMQ en `platform`)
-  siguen funcionando.
-- El **DNS del ALB se mantiene**: las URLs públicas y la variable `WAREHOUSES`
-  de central siguen siendo válidas.
-- Las credenciales son nuevas: repite `scripts/lab_credentials.sh`.
-- Si tu IP pública cambió, actualiza `my_ip_cidr` y `terraform apply`.
-- Orden de recuperación natural: `platform` (RabbitMQ/Redis) puede arrancar
-  después que las bodegas; las APIs degradan (caché caída → PostgreSQL, outbox
-  acumula eventos) y se recuperan solas.
-
-## 9. Destruir
+Comandos sueltos útiles:
 
 ```bash
 cd infrastructure/terraform
-terraform destroy
+ALB=$(terraform output -raw alb_dns)
+curl -s http://$ALB/health                       # central (pending_commands = cola de respaldo)
+curl -s http://$ALB/warehouses/connectivity      # la central prueba la red privada hacia cada bodega
+curl -s http://$ALB/reports/warehouses           # reporte general de bodegas
+curl -s http://$ALB:8002/sync/status             # cola local de WH-002 (outbox_pending)
+curl -s -X POST http://$ALB/warehouses/WH-002/resync
+terraform output ssm_commands                    # consola en cada bodega (Session Manager)
+aws ecs describe-services --cluster $(terraform output -raw ecs_cluster) --services rabbitmq central-api \
+  --query 'services[].[serviceName,runningCount,desiredCount]' --output table
+aws logs tail /warehouse-platform/wh-002-outbox --since 10m
+aws logs tail /warehouse-platform/central-projection-worker --follow
 ```
 
-Los repositorios ECR (`force_delete`) y el bucket S3 (`force_destroy`, incluso
-con versiones) se eliminan aunque tengan contenido. RDS no deja snapshot final.
+## 6. Logs
 
-## 10. Costes estimados y control del presupuesto
+CloudWatch, retención 7 días: `/warehouse-platform/wh-00X-{api,outbox,cache-worker,postgres,redis}`,
+`/warehouse-platform/central-{rabbitmq,central-api,command-relay,transfer-orchestrator,projection-worker,audit-worker,report-worker}`
+y `/aws/lambda/s3_processor`.
 
-Precios on-demand aproximados en `us-east-1`:
+## 7. Al terminar / reiniciar la sesión
+
+- Las EC2 se detienen al terminar la sesión; al volver a *Start Lab* normalmente arrancan solas. Si no:
+  `aws ec2 start-instances --instance-ids $(terraform output -json instance_ids | tr -d '[]" ' | tr ',' ' ')`.
+- Las **IPs privadas de las bodegas son fijas** (`10.X.10.10`), así que la central las sigue encontrando.
+  Docker y los contenedores (`restart: unless-stopped`) arrancan solos con los datos en disco.
+- Al volver, cada outbox relay reconecta, envía lo pendiente y un snapshot: la central queda sincronizada sola.
+- Los servicios ECS mantienen su número de tareas; el broker recupera sus colas desde EFS.
+
+## 8. Costes estimados (us-east-1, on-demand)
 
 | Recurso | USD/hora |
 |---|---|
-| EC2 platform t3.medium | 0.042 |
-| EC2 wh-a + 2× wh-b t3.small | 0.062 |
-| RDS db.t3.micro single-AZ (+20 GB gp2) | 0.017 (+0.003) |
-| ALB (base + LCU bajo) | ~0.03 |
-| IPv4 públicas (4 EC2 + ALB) | ~0.03 |
-| EBS gp3 68 GB | ~0.008 |
-| **Total con todo en marcha** | **~0.19 USD/h ≈ 0.75 USD por sesión de 4 h** |
+| 4 NAT Gateway (uno por VPC) | ~0.180 |
+| 3 EC2 t3.small | 0.062 |
+| Fargate: broker 1 vCPU/2 GB + 7 tareas de 0.25-0.5 vCPU | ~0.150 |
+| RDS db.t3.micro | 0.017 |
+| ALB + NLB | ~0.045 |
+| IPv4 públicas (4 NAT + ALB) | ~0.030 |
+| EFS, EBS, S3, Lambda, CloudWatch | céntimos |
+| **Total** | **~0.50 USD/h ≈ 2 USD por sesión de 4 h** |
 
-S3, Lambda, ECR (<1 GB) y CloudWatch Logs con 7 días de retención son céntimos.
+Los NAT Gateways cobran aunque las EC2 estén paradas: si no vas a usar el entorno en días, `scripts/aws_deploy.sh --destroy`
+(o `terraform destroy`). Para la prueba de carga de 1000-2000 req/s sube `warehouse_instance_type` (p. ej. `t3.medium`),
+`broker_cpu`/`broker_memory`, `projection_workers` y `central_api_count`, y bájalos al terminar.
 
-Con la sesión terminada las EC2 paran, pero **siguen cobrando** ALB, EBS,
-IPv4 del ALB, ECR y almacenamiento de RDS (y la instancia RDS si el lab no la
-detiene): ≈ 1-1.5 USD/día. Recomendaciones:
-
-- Si no vas a usar el entorno en varios días: `terraform destroy` (re-crearlo
-  tarda ~15 min) o, como mínimo, `aws rds stop-db-instance --db-instance-identifier warehouse-platform-pg`
-  (AWS lo vuelve a arrancar a los 7 días).
-- Vigila el gasto en la cabecera del Learner Lab (*Budget: $x of $100*); se
-  actualiza con varias horas de retraso.
-- No subas `wh002_instances` ni los tipos de instancia salvo para la prueba de
-  carga, y vuelve a bajarlos después.
-- Si el presupuesto se agota, el lab se bloquea y **se borran los recursos**.
-
-## 11. Problemas frecuentes
+## 9. Problemas frecuentes
 
 | Síntoma | Causa / solución |
 |---|---|
-| `ExpiredToken` en Terraform/CLI | Sesión caducada: `scripts/lab_credentials.sh` |
-| Targets `unhealthy` justo tras el apply | Bootstrap en curso (3-5 min) o imágenes ausentes en ECR → `build_push_ecr.sh` + `redeploy.sh` |
-| `AccessDenied` al crear algo | Servicio/acción no permitido en Learner Lab; usa solo los tipos de instancia `nano..large` |
-| API de bodega reinicia en bucle | La base aún no existía (platform no terminó); se recupera sola al crearse |
-| No llega por SSH | Tu IP cambió: actualiza `my_ip_cidr` |
+| `ExpiredToken` | Sesión caducada: `scripts/lab_credentials.sh` |
+| Targets de bodega `unhealthy` justo tras el apply | Bootstrap en curso (3-5 min) o imágenes ausentes en ECR → `build_push_ecr.sh` y en la EC2 `sudo /opt/warehouse/redeploy.sh` (por SSM) |
+| Tareas ECS en `PROVISIONING`/`STOPPED` con `CannotPullContainerError` | Imágenes no publicadas en ECR o NAT aún no disponible; ECS reintenta solo |
+| `aws_verify.sh` falla en las secciones 4-5 (SSM) | El agente SSM tarda unos minutos en registrarse; si el lab no permite SSM, prueba el aislamiento con `GET /warehouses/connectivity` y revisa SG/NACL/rutas (secciones 1-3) |
+| La consola RabbitMQ no abre | Tu IP cambió: actualiza `my_ip_cidr` y `terraform apply` |

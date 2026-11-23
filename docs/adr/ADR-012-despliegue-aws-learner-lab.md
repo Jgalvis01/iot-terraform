@@ -1,6 +1,6 @@
 # ADR-012 — Despliegue en AWS Learner Lab (EC2 + ECR + RDS único + ALB por puertos)
 
-**Estado:** Aceptada (condicionada por las restricciones del Learner Lab)
+**Estado:** Reemplazada en la topología por [ADR-015](ADR-015-vpc-por-bodega-y-central-ecs.md) (siguen vigentes las restricciones del Learner Lab: LabRole, credenciales temporales, presupuesto)
 
 ## Contexto
 

@@ -139,7 +139,7 @@ flowchart TB
 
 | Componente | Responsabilidad | Tecnología | Escala | Estado |
 |---|---|---|---|---|
-| `warehouse-api` (x3 bodegas) | CRUD productos, inventario, movimientos, comandos de saga, Cache Aside, escribe outbox | FastAPI, SQLAlchemy, Redis | Horizontal por bodega (WH-002 con 3 réplicas locales / `wh002_instances` en AWS) | Stateless (estado en PG/Redis) |
+| `warehouse-api` (x3 bodegas) | CRUD productos, inventario, movimientos, comandos de saga, Cache Aside, escribe outbox | FastAPI, SQLAlchemy, Redis | Horizontal por bodega (WH-002 con 3 réplicas locales; en AWS una EC2 por bodega con `--workers` configurable) | Stateless (estado en PG/Redis) |
 | PostgreSQL por bodega | Fuente de verdad de la bodega; `inventory`, `movements`, `outbox`, `processed_commands` | PostgreSQL 15 | Vertical (o réplicas de lectura, propuesta) | Con estado |
 | Redis por bodega | Caché de lecturas de inventario (TTL 30 s, `allkeys-lru`, 128 MB) | Redis 7 | Una instancia por bodega | Con estado efímero (descartable) |
 | `outbox-relay` (x3) | Publica filas `outbox` pendientes a RabbitMQ | Python, pika | 1 por bodega (`SKIP LOCKED` permite más) | Sin estado (estado en `outbox`) |
@@ -268,43 +268,55 @@ Cada comando en la bodega es idempotente por `(transfer_id, step)` (`processed_c
 
 ## 6. Diagrama de despliegue AWS (Learner Lab)
 
+Una VPC por bodega + VPC central, peering hub-and-spoke (ADR-015). Las bodegas no tienen ruta entre ellas.
+
 ```mermaid
 flowchart TB
     user([Internet]) --> alb
 
-    subgraph VPC["VPC 10.20.0.0/16 (us-east-1, sin NAT)"]
-        subgraph PUB["Subnets publicas"]
-            alb{{"ALB<br/>:80 central | :8001 WH-001 | :8002 WH-002 | :8003 WH-003"}}
-            plat["EC2 platform t3.medium<br/>RabbitMQ, Redis x3, central-api,<br/>orchestrator, projection, audit, report,<br/>cache-worker x3, outbox x3"]
-            wha["EC2 wh-a t3.small<br/>wh-001-api :8001<br/>wh-003-api :8003"]
-            whb["EC2 wh-b x N t3.small<br/>wh-002-api :8002"]
+    subgraph VC["VPC central 10.0.0.0/16"]
+        subgraph CPUB["Subnets públicas (2 AZ)"]
+            alb{{"ALB<br/>:80 central | :8001-8003 bodegas | :15672 consola MQ"}}
+            natc[NAT]
         end
-        subgraph PRIV["Subnets privadas"]
-            rds[("RDS PostgreSQL 15 db.t3.micro<br/>wh_001, wh_002, wh_003, central_read")]
+        subgraph CPRIV["Subnets privadas (2 AZ) — ECS Fargate"]
+            api["central-api x2"]
+            relay["command-relay"]
+            wk["orchestrator · projection x2<br/>audit · report"]
+            nlb{{"NLB interno :5672"}}
+            mq[["RabbitMQ (EFS)"]]
+            rds[("RDS central_read")]
         end
     end
 
-    alb --> plat
-    alb --> wha
-    alb --> whb
-    plat --> rds
-    wha --> rds
-    whb --> rds
-    wha -. Redis / RabbitMQ .-> plat
-    whb -. Redis / RabbitMQ .-> plat
-    plat -- "HTTP via DNS del ALB" --> alb
+    subgraph V1["VPC WH-001 10.1.0.0/16"]
+        n1[NAT pública]
+        e1["EC2 10.1.10.10 (privada)<br/>Docker: api, postgres, redis,<br/>outbox x2, cache-worker<br/>SG wh-001 + NACL"]
+    end
+    subgraph V2["VPC WH-002 10.2.0.0/16"]
+        n2[NAT pública]
+        e2["EC2 10.2.10.10 (privada)<br/>SG wh-002 + NACL"]
+    end
+    subgraph V3["VPC WH-003 10.3.0.0/16"]
+        n3[NAT pública]
+        e3["EC2 10.3.10.10 (privada)<br/>SG wh-003 + NACL"]
+    end
 
-    ecr[(ECR: warehouse-api, central-api,<br/>workers, batch, iot, frontend)] -. pull al arrancar .-> plat
-    ecr -.-> wha
-    ecr -.-> whb
-    s3[(S3 warehouse-platform-sufijo)] -- "exports/ ObjectCreated" --> lam[[Lambda s3_processor<br/>LabRole]]
-    lam --> s3
-    plat --> s3
-    plat & wha & whb -. awslogs .-> cwl[CloudWatch Logs<br/>/warehouse-platform/*]
-    lam -.-> cwl
+    alb --> api
+    alb -- peering --> e1 & e2 & e3
+    api & wk -- "HTTP por peering" --> e1 & e2 & e3
+    e1 & e2 & e3 -- "AMQP por peering" --> nlb --> mq
+    api & relay & wk --> nlb
+    api & relay & wk --> rds
+    e1 x--x e2
+    e2 x--x e3
+
+    ecr[(ECR)] -. pull vía NAT .-> e1 & e2 & e3 & api
+    s3[(S3)] -- "exports/" --> lam[[Lambda s3_processor]]
+    wk --> s3
 ```
 
-Estado real en AWS: **sí** APIs, workers de central, RabbitMQ/Redis, RDS, S3, Lambda, ALB y CloudWatch Logs; **no** IoT, Prometheus/Grafana, ni planificador del Batch (solo local). Detalles y trade-offs en `docs/aws-deployment.md` y ADR-012.
+Estado real en AWS: **sí** APIs de bodega (EC2), central y workers (ECS), RabbitMQ (ECS + EFS), RDS, S3, Lambda, ALB/NLB y CloudWatch Logs; **no** IoT, Prometheus/Grafana, ni planificador del Batch (solo local). Detalles en `docs/aws-deployment.md`, ADR-015 y ADR-016.
 
 ## 7. Topología local (Docker Compose)
 

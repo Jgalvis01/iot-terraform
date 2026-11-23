@@ -3,7 +3,8 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CDIR="$ROOT/infrastructure/compose"
 if docker compose version >/dev/null 2>&1; then DC=(docker compose); else DC=(docker-compose); fi
-dc() { "${DC[@]}" --project-directory "$CDIR" -f "$CDIR/docker-compose.yml" "$@"; }
+# COMPOSE_OVERRIDE=/ruta/override.yml para añadir un fichero extra (p.ej. remapear puertos)
+dc() { "${DC[@]}" --project-directory "$CDIR" -f "$CDIR/docker-compose.yml" ${COMPOSE_OVERRIDE:+-f "$COMPOSE_OVERRIDE"} "$@"; }
 WH1=${WH1:-http://localhost:8001}; WH2=${WH2:-http://localhost:8002}; WH3=${WH3:-http://localhost:8003}
 CENTRAL=${CENTRAL:-http://localhost:8000}
 title() { printf '\n\033[1;34m### %s\033[0m\n' "$*"; }

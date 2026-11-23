@@ -15,11 +15,13 @@ Todas las decisiones describen lo que **realmente existe** en el repositorio; lo
 | [ADR-007](ADR-007-saga-orquestada.md) | Saga orquestada con compensaciones (vs coreografía) | F6 | `workers/saga.py` |
 | [ADR-008](ADR-008-cqrs-read-model-central.md) | CQRS: read model central (vs fan-out) | F7 | `workers/projection.py`, `central-api/.../global_inventory.py` |
 | [ADR-009](ADR-009-sku-identidad-global.md) | `sku` como identidad global de producto | F4, F6, F7 | `docs/design-contracts.md` §0 |
-| [ADR-010](ADR-010-load-balancer-y-apis-stateless.md) | Nginx local / ALB en AWS y APIs stateless | F5 | `infrastructure/compose/nginx/wh-002-lb.conf`, `modules/load_balancer` |
+| [ADR-010](ADR-010-load-balancer-y-apis-stateless.md) | Nginx local / ALB en AWS y APIs stateless | F5 | `infrastructure/compose/nginx/wh-002-lb.conf`, `modules/central/alb.tf` |
 | [ADR-011](ADR-011-s3-batch-worker-lambda.md) | S3 + Batch vs Worker vs Lambda | F8, F9 | `services/batch`, `workers/report.py`, `services/lambda` |
-| [ADR-012](ADR-012-despliegue-aws-learner-lab.md) | Despliegue AWS Learner Lab (EC2 + ECR + RDS + ALB) | F11 / AWS | `infrastructure/terraform/`, `docs/aws-deployment.md` |
+| [ADR-012](ADR-012-despliegue-aws-learner-lab.md) | Despliegue AWS Learner Lab (EC2 + ECR + RDS + ALB) — *topología reemplazada por ADR-015* | F11 / AWS | `infrastructure/terraform/`, `docs/aws-deployment.md` |
 | [ADR-013](ADR-013-observabilidad.md) | Observabilidad: correlation id, logs JSON, Prometheus/Grafana, CloudWatch | F11 | `wcommon/correlation.py`, `logging.py`, `metrics.py` |
 | [ADR-014](ADR-014-iot-mqtt-ingestion.md) | IoT: MQTT + ingestion + dedupe/orden por `sequence_number` | F12 | `services/iot`, `workers/iot_storage.py` |
+| [ADR-015](ADR-015-vpc-por-bodega-y-central-ecs.md) | Una VPC por bodega (EC2) + central en ECS, peering hub-and-spoke | AWS | `infrastructure/terraform/modules/{vpc,peering,warehouse,central}` |
+| [ADR-016](ADR-016-colas-de-respaldo-y-resincronizacion.md) | Colas de respaldo ante caída del broker y resincronización de bodegas | F10 / AWS | `warehouse-api/app/sync.py`, `central-api/app/command_outbox.py` |
 
 ## Documentos relacionados
 
